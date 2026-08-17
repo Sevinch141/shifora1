@@ -20,11 +20,11 @@ export function verifyPassword(password, stored) {
   return timingSafeEqual(derived, expected);
 }
 
-export function createSession(userId) {
+export async function createSession(userId) {
   const token = randomBytes(32).toString('hex');
   const expiresAt = toLocal(addDays(new Date(), SESSION_DAYS));
-  insert(
-    'INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)',
+  await insert(
+    'INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?) RETURNING token',
     token,
     userId,
     expiresAt,
@@ -32,9 +32,9 @@ export function createSession(userId) {
   return { token, expiresAt };
 }
 
-export function resolveSession(token) {
+export async function resolveSession(token) {
   if (!token) return null;
-  const row = get(
+  const row = await get(
     `SELECT s.token, s.expires_at, u.*
        FROM sessions s
        JOIN users u ON u.id = s.user_id
@@ -43,13 +43,13 @@ export function resolveSession(token) {
   );
   if (!row) return null;
   if (row.expires_at < toLocal()) {
-    run('DELETE FROM sessions WHERE token = ?', token);
+    await run('DELETE FROM sessions WHERE token = ?', token);
     return null;
   }
   const { token: _t, expires_at: _e, password_hash: _p, ...user } = row;
   return user;
 }
 
-export function destroySession(token) {
-  run('DELETE FROM sessions WHERE token = ?', token);
+export async function destroySession(token) {
+  await run('DELETE FROM sessions WHERE token = ?', token);
 }

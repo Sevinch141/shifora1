@@ -16,16 +16,16 @@ const ROLE_GROUPS = {
   caregiver: ['caregiver'],
 };
 
-function buildContext(user) {
+async function buildContext(user) {
   const context = { hospital: null, patient: null, patients: [] };
   if (user.hospital_id) {
-    context.hospital = get('SELECT id, name, region FROM hospitals WHERE id = ?', user.hospital_id);
+    context.hospital = await get('SELECT id, name, region FROM hospitals WHERE id = ?', user.hospital_id);
   }
   if (user.role === 'patient') {
-    context.patient = patientForUser(user.id);
+    context.patient = await patientForUser(user.id);
   }
   if (user.role === 'caregiver') {
-    context.patients = patientsForCaregiver(user.id).map((p) => ({
+    context.patients = (await patientsForCaregiver(user.id)).map((p) => ({
       id: p.id,
       first_name: p.first_name,
       last_name: p.last_name,
@@ -37,14 +37,14 @@ function buildContext(user) {
 
 router.post(
   '/login',
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const { phone, password, role_group: roleGroup } = validate(req.body, {
       phone: { required: true, message: 'Telefon raqamini kiriting.' },
       password: { required: true, message: 'Parolni kiriting.' },
       role_group: { required: false },
     });
 
-    const user = get('SELECT * FROM users WHERE phone = ? AND is_active = 1', phone);
+    const user = await get('SELECT * FROM users WHERE phone = ? AND is_active = 1', phone);
     if (!user || !verifyPassword(password, user.password_hash)) {
       throw new ApiError(401, "Telefon raqami yoki parol noto'g'ri.");
     }
@@ -54,15 +54,15 @@ router.post(
       throw new ApiError(403, 'Bu hisob tanlangan bo‘lim uchun mos emas. Boshqa bo‘limni tanlang.');
     }
 
-    const { token, expiresAt } = createSession(user.id);
+    const { token, expiresAt } = await createSession(user.id);
     const { password_hash: _drop, ...safeUser } = user;
-    audit({ user, ip: req.ip }, 'auth.login', 'user', user.id, { role: user.role });
+    await audit({ user, ip: req.ip }, 'auth.login', 'user', user.id, { role: user.role });
 
     res.json({
       token,
       expires_at: expiresAt,
       user: safeUser,
-      context: buildContext(user),
+      context: await buildContext(user),
     });
   }),
 );
@@ -70,9 +70,9 @@ router.post(
 router.post(
   '/logout',
   requireAuth,
-  wrap((req, res) => {
-    audit(req, 'auth.logout', 'user', req.user.id);
-    destroySession(req.token);
+  wrap(async (req, res) => {
+    await audit(req, 'auth.logout', 'user', req.user.id);
+    await destroySession(req.token);
     res.json({ ok: true });
   }),
 );
@@ -80,8 +80,8 @@ router.post(
 router.get(
   '/me',
   requireAuth,
-  wrap((req, res) => {
-    res.json({ user: req.user, context: buildContext(req.user) });
+  wrap(async (req, res) => {
+    res.json({ user: req.user, context: await buildContext(req.user) });
   }),
 );
 

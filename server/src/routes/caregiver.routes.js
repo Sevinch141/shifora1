@@ -20,11 +20,13 @@ router.use(requireAuth, requireRole('caregiver'));
  */
 router.get(
   '/patients',
-  wrap((req, res) => {
-    const patients = patientsForCaregiver(req.user.id).map((patient) => {
-      const permissions = caregiverPermissions(patient.caregiver_id);
-      const plan = permissions.view_today_plan ? getDailyPlan(patient.id) : null;
-      return {
+  wrap(async (req, res) => {
+    const linked = await patientsForCaregiver(req.user.id);
+    const patients = [];
+    for (const patient of linked) {
+      const permissions = await caregiverPermissions(patient.caregiver_id);
+      const plan = permissions.view_today_plan ? await getDailyPlan(patient.id) : null;
+      patients.push({
         id: patient.id,
         first_name: patient.first_name,
         last_name: patient.last_name,
@@ -43,26 +45,26 @@ router.get(
               missed: plan.summary.missed,
             }
           : null,
-        adherence: permissions.view_adherence ? adherenceRate(patient.id, 7).rate : null,
+        adherence: permissions.view_adherence ? (await adherenceRate(patient.id, 7)).rate : null,
         open_alerts: permissions.view_alerts
-          ? (get(
+          ? (await get(
               `SELECT COUNT(*) AS c FROM alerts WHERE patient_id = ? AND status != 'closed'`,
               patient.id,
             )?.c ?? 0)
           : null,
-      };
-    });
+      });
+    }
     res.json({ patients });
   }),
 );
 
 router.get(
   '/patients/:id',
-  wrap((req, res) => {
-    const { patient, permissions, caregiver } = assertPatientAccess(req.user, req.params.id);
-    audit(req, 'caregiver.view_patient', 'patient', patient.id);
+  wrap(async (req, res) => {
+    const { patient, permissions, caregiver } = await assertPatientAccess(req.user, req.params.id);
+    await audit(req, 'caregiver.view_patient', 'patient', patient.id);
 
-    const plan = getActivePlan(patient.id);
+    const plan = await getActivePlan(patient.id);
     res.json({
       patient: {
         id: patient.id,
@@ -73,12 +75,12 @@ router.get(
       },
       relation: caregiver.relation,
       permissions,
-      today: permissions.view_today_plan ? getDailyPlan(patient.id) : null,
+      today: permissions.view_today_plan ? await getDailyPlan(patient.id) : null,
       adherence: permissions.view_adherence
-        ? { d7: adherenceRate(patient.id, 7), last_activity: lastActivity(patient.id) }
+        ? { d7: await adherenceRate(patient.id, 7), last_activity: await lastActivity(patient.id) }
         : null,
       alerts: permissions.view_alerts
-        ? all(
+        ? await all(
             `SELECT id, severity, title, detail, status, created_at FROM alerts
               WHERE patient_id = ? ORDER BY created_at DESC LIMIT 20`,
             patient.id,
@@ -86,18 +88,18 @@ router.get(
         : null,
       measurements: permissions.view_measurements
         ? {
-            glucose: all(
+            glucose: await all(
               'SELECT * FROM glucose_readings WHERE patient_id = ? ORDER BY measured_at DESC LIMIT 10',
               patient.id,
             ),
-            blood_pressure: all(
+            blood_pressure: await all(
               'SELECT * FROM blood_pressure_readings WHERE patient_id = ? ORDER BY measured_at DESC LIMIT 10',
               patient.id,
             ),
           }
         : null,
-      care_plan: permissions.view_care_plan && plan ? getPlanDetail(plan.id) : null,
-      hospital: get('SELECT name, phone FROM hospitals WHERE id = ?', patient.hospital_id),
+      care_plan: permissions.view_care_plan && plan ? await getPlanDetail(plan.id) : null,
+      hospital: await get('SELECT name, phone FROM hospitals WHERE id = ?', patient.hospital_id),
     });
   }),
 );
@@ -105,16 +107,16 @@ router.get(
 /** "Hamshiraga murojaat" — puts the caregiver's concern in the nurse queue. */
 router.post(
   '/patients/:id/contact-nurse',
-  wrap((req, res) => {
-    const { patient, caregiver } = assertPatientAccess(req.user, req.params.id);
+  wrap(async (req, res) => {
+    const { patient, caregiver } = await assertPatientAccess(req.user, req.params.id);
     const message = String(req.body?.message ?? '').trim();
     if (!message) {
       throw badRequest('Xabar matnini kiriting.', { message: 'Xabar bo‘sh bo‘lmasligi kerak.' });
     }
 
-    const alertId = raiseAlert({
+    const alertId = await raiseAlert({
       patient,
-      carePlanId: getActivePlan(patient.id)?.id ?? null,
+      carePlanId: await getActivePlan(patient.id)?.id ?? null,
       code: 'caregiver_request',
       severity: 'warning',
       title: 'Yaqin kishidan murojaat',
@@ -123,7 +125,7 @@ router.post(
       dedupKey: `caregiver_request:${patient.id}:${req.user.id}`,
     });
 
-    notify({
+    await notify({
       userId: req.user.id,
       patientId: patient.id,
       type: 'info',
@@ -132,7 +134,7 @@ router.post(
       entityType: 'alert',
       entityId: alertId,
     });
-    audit(req, 'caregiver.contact_nurse', 'alert', alertId, { patient_id: patient.id });
+    await audit(req, 'caregiver.contact_nurse', 'alert', alertId, { patient_id: patient.id });
 
     res.status(201).json({ alert_id: alertId });
   }),

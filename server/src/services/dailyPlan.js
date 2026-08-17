@@ -6,10 +6,10 @@ import { toDateKey } from '../lib/time.js';
  * sees for a given day. Doses and measurements are merged into one stream so
  * the next thing to do is always the top pending item.
  */
-export function getDailyPlan(patientId, dateKey = toDateKey()) {
+export async function getDailyPlan(patientId, dateKey = toDateKey()) {
   const like = `${dateKey}%`;
 
-  const doses = all(
+  const doseRows = await all(
     `SELECT d.id, d.scheduled_at, d.status, d.taken_at, d.snoozed_until, d.reminder_count,
             m.name, m.dose, m.unit, m.priority, m.notes
        FROM medication_doses d
@@ -17,7 +17,8 @@ export function getDailyPlan(patientId, dateKey = toDateKey()) {
       WHERE d.patient_id = ? AND d.scheduled_at LIKE ?
       ORDER BY d.scheduled_at`,
     patientId, like,
-  ).map((d) => ({
+  );
+  const doses = doseRows.map((d) => ({
     kind: 'medication',
     id: d.id,
     time: d.scheduled_at.slice(11),
@@ -30,13 +31,14 @@ export function getDailyPlan(patientId, dateKey = toDateKey()) {
     note: d.notes,
   }));
 
-  const tasks = all(
+  const taskRows = await all(
     `SELECT id, type, context, scheduled_at, status, completed_at
        FROM monitoring_tasks
       WHERE patient_id = ? AND scheduled_at LIKE ?
       ORDER BY scheduled_at`,
     patientId, like,
-  ).map((t) => ({
+  );
+  const tasks = taskRows.map((t) => ({
     kind: t.type,
     id: t.id,
     time: t.scheduled_at.slice(11),

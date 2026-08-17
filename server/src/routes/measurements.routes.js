@@ -21,21 +21,21 @@ router.use(requireAuth);
  * Measurements can be entered by the patient for themselves, or by hospital
  * staff on the patient's behalf. Either way the same authorisation gate runs.
  */
-function resolvePatient(req) {
+async function resolvePatient(req) {
   if (req.user.role === 'patient') {
-    const patient = patientForUser(req.user.id);
+    const patient = await patientForUser(req.user.id);
     if (!patient) throw forbidden('Hisobingiz bemor kartasiga bog‘lanmagan.');
     return patient;
   }
   const patientId = req.body?.patient_id ?? req.query?.patient_id;
   if (!patientId) throw badRequest('Bemor tanlanmagan.');
-  return assertPatientAccess(req.user, patientId).patient;
+  return (await assertPatientAccess(req.user, patientId)).patient;
 }
 
 /** Ties a submitted reading to the nearest scheduled measurement of that day. */
-function completeNearestTask(patientId, type, measuredAt, recordId) {
+async function completeNearestTask(patientId, type, measuredAt, recordId) {
   const dateKey = measuredAt.slice(0, 10);
-  const candidates = all(
+  const candidates = await all(
     `SELECT * FROM monitoring_tasks
       WHERE patient_id = ? AND type = ? AND scheduled_at LIKE ?
         AND status IN ('pending', 'missed')`,
@@ -48,7 +48,7 @@ function completeNearestTask(patientId, type, measuredAt, recordId) {
   }, null);
   if (!nearest || nearest.distance > 180) return null;
 
-  run(
+  await run(
     `UPDATE monitoring_tasks
         SET status = 'done', completed_at = ?, record_id = ?, updated_at = datetime('now')
       WHERE id = ?`,
@@ -63,8 +63,8 @@ function completeNearestTask(patientId, type, measuredAt, recordId) {
 
 router.post(
   '/glucose',
-  wrap((req, res) => {
-    const patient = resolvePatient(req);
+  wrap(async (req, res) => {
+    const patient = await resolvePatient(req);
     const input = validate(req.body, {
       value: { required: true, type: 'number', min: 10, max: 900, message: 'Glyukoza qiymatini kiriting.' },
       context: {
@@ -77,17 +77,17 @@ router.post(
     });
     const measuredAt = (input.measured_at ?? nowLocal()).slice(0, 16).replace('T', ' ');
 
-    const id = insert(
+    const id = await insert(
       `INSERT INTO glucose_readings
          (patient_id, value, unit, context, measured_at, note, source, created_by)
        VALUES (?, ?, 'mg/dL', ?, ?, ?, 'manual', ?)`,
       patient.id, input.value, input.context, measuredAt, input.note, req.user.id,
     );
-    completeNearestTask(patient.id, 'glucose', measuredAt, id);
+    await completeNearestTask(patient.id, 'glucose', measuredAt, id);
 
-    const reading = get('SELECT * FROM glucose_readings WHERE id = ?', id);
-    const alertId = evaluateGlucose(patient, reading, getActivePlan(patient.id));
-    audit(req, 'glucose.create', 'glucose_reading', id, { patient_id: patient.id, value: input.value });
+    const reading = await get('SELECT * FROM glucose_readings WHERE id = ?', id);
+    const alertId = await evaluateGlucose(patient, reading, await getActivePlan(patient.id));
+    await audit(req, 'glucose.create', 'glucose_reading', id, { patient_id: patient.id, value: input.value });
 
     res.status(201).json({ reading, alert_id: alertId });
   }),
@@ -99,8 +99,8 @@ router.post(
 
 router.post(
   '/blood-pressure',
-  wrap((req, res) => {
-    const patient = resolvePatient(req);
+  wrap(async (req, res) => {
+    const patient = await resolvePatient(req);
     const input = validate(req.body, {
       systolic: { required: true, type: 'number', min: 50, max: 300, message: 'Sistolik bosimni kiriting.' },
       diastolic: { required: true, type: 'number', min: 30, max: 200, message: 'Diastolik bosimni kiriting.' },
@@ -115,17 +115,17 @@ router.post(
     }
     const measuredAt = (input.measured_at ?? nowLocal()).slice(0, 16).replace('T', ' ');
 
-    const id = insert(
+    const id = await insert(
       `INSERT INTO blood_pressure_readings
          (patient_id, systolic, diastolic, pulse, measured_at, note, source, created_by)
        VALUES (?, ?, ?, ?, ?, ?, 'manual', ?)`,
       patient.id, input.systolic, input.diastolic, input.pulse, measuredAt, input.note, req.user.id,
     );
-    completeNearestTask(patient.id, 'blood_pressure', measuredAt, id);
+    await completeNearestTask(patient.id, 'blood_pressure', measuredAt, id);
 
-    const reading = get('SELECT * FROM blood_pressure_readings WHERE id = ?', id);
-    const alertId = evaluateBloodPressure(patient, reading, getActivePlan(patient.id));
-    audit(req, 'bp.create', 'blood_pressure_reading', id, { patient_id: patient.id });
+    const reading = await get('SELECT * FROM blood_pressure_readings WHERE id = ?', id);
+    const alertId = await evaluateBloodPressure(patient, reading, await getActivePlan(patient.id));
+    await audit(req, 'bp.create', 'blood_pressure_reading', id, { patient_id: patient.id });
 
     res.status(201).json({ reading, alert_id: alertId });
   }),
@@ -137,8 +137,8 @@ router.post(
 
 router.post(
   '/symptom-check',
-  wrap((req, res) => {
-    const patient = resolvePatient(req);
+  wrap(async (req, res) => {
+    const patient = await resolvePatient(req);
     const input = validate(req.body, {
       feeling: {
         required: true,
@@ -151,16 +151,16 @@ router.post(
     const symptoms = (req.body.symptoms ?? []).filter((key) => key in SYMPTOM_LABELS_UZ);
     const reportedAt = (input.reported_at ?? nowLocal()).slice(0, 16).replace('T', ' ');
 
-    const id = insert(
+    const id = await insert(
       `INSERT INTO symptom_checks (patient_id, feeling, symptoms, note, reported_at, created_by)
        VALUES (?, ?, ?, ?, ?, ?)`,
       patient.id, input.feeling, JSON.stringify(symptoms), input.note, reportedAt, req.user.id,
     );
-    completeNearestTask(patient.id, 'symptom', reportedAt, id);
+    await completeNearestTask(patient.id, 'symptom', reportedAt, id);
 
-    const check = get('SELECT * FROM symptom_checks WHERE id = ?', id);
-    const alertId = evaluateSymptomCheck(patient, check, getActivePlan(patient.id));
-    audit(req, 'symptom.create', 'symptom_check', id, { patient_id: patient.id, feeling: input.feeling });
+    const check = await get('SELECT * FROM symptom_checks WHERE id = ?', id);
+    const alertId = await evaluateSymptomCheck(patient, check, await getActivePlan(patient.id));
+    await audit(req, 'symptom.create', 'symptom_check', id, { patient_id: patient.id, feeling: input.feeling });
 
     res.status(201).json({ check, alert_id: alertId });
   }),
@@ -172,22 +172,22 @@ router.post(
 
 router.get(
   '/',
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const patient = req.user.role === 'patient'
-      ? patientForUser(req.user.id)
-      : assertPatientAccess(req.user, req.query.patient_id, 'view_measurements').patient;
+      ? await patientForUser(req.user.id)
+      : (await assertPatientAccess(req.user, req.query.patient_id, 'view_measurements')).patient;
     const limit = Math.min(Number(req.query.limit) || 30, 200);
 
     res.json({
-      glucose: all(
+      glucose: await all(
         'SELECT * FROM glucose_readings WHERE patient_id = ? ORDER BY measured_at DESC LIMIT ?',
         patient.id, limit,
       ),
-      blood_pressure: all(
+      blood_pressure: await all(
         'SELECT * FROM blood_pressure_readings WHERE patient_id = ? ORDER BY measured_at DESC LIMIT ?',
         patient.id, limit,
       ),
-      symptoms: all(
+      symptoms: await all(
         'SELECT * FROM symptom_checks WHERE patient_id = ? ORDER BY reported_at DESC LIMIT ?',
         patient.id, limit,
       ).map((s) => ({ ...s, symptoms: JSON.parse(s.symptoms) })),

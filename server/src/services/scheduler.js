@@ -10,10 +10,12 @@ import { generateTasksForAllActivePlans } from './carePlan.js';
  * Everything it does is driven by values stored on the care plan — repeat
  * interval, number of reminders, snooze length and per-priority escalation
  * windows. No timing is hard-coded here.
+ *
+ * On a serverless platform nothing stays running between requests, so `tick()`
+ * is invoked by a scheduled HTTP call (see routes/cron.routes.js) instead of a
+ * timer. The logic is identical either way, and the tick is idempotent: it can
+ * safely run late, twice, or after a long gap.
  */
-
-const TICK_MS = 60_000;
-const REGENERATE_EVERY_TICKS = 30;
 
 const MONITORING_UZ = {
   glucose: { title: "Glyukozani o'lchash vaqti", body: "Glyukoza o'lchovini kiriting." },
@@ -27,9 +29,9 @@ function escalationWindow(plan, priority) {
   return plan.escalate_normal_minutes;
 }
 
-function sendDoseReminder(dose, medication, patient, attempt) {
+async function sendDoseReminder(dose, medication, patient, attempt) {
   if (!patient.user_id) return;
-  notify({
+  await notify({
     userId: patient.user_id,
     patientId: patient.id,
     type: 'medication_reminder',
@@ -38,7 +40,7 @@ function sendDoseReminder(dose, medication, patient, attempt) {
     entityType: 'medication_dose',
     entityId: dose.id,
   });
-  run(
+  await run(
     `UPDATE medication_doses
         SET reminder_count = ?, last_reminder_at = ?, status = 'pending', snoozed_until = NULL,
             updated_at = datetime('now')
@@ -49,8 +51,8 @@ function sendDoseReminder(dose, medication, patient, attempt) {
   );
 }
 
-function processMedicationDoses(now) {
-  const doses = all(
+async function processMedicationDoses(now) {
+  const doses = await all(
     `SELECT d.*, m.name, m.dose, m.unit, m.priority,
             p.id AS p_id, p.user_id, p.first_name, p.last_name, p.hospital_id,
             cp.reminder_repeat_minutes, cp.reminder_max_count,
@@ -65,6 +67,9 @@ function processMedicationDoses(now) {
     now,
     addMinutes(now, -60 * 24 * 2),
   );
+
+  let reminders = 0;
+  let escalations = 0;
 
   for (const row of doses) {
     const patient = {
@@ -90,25 +95,28 @@ function processMedicationDoses(now) {
 
     // 1. Escalate first: an unconfirmed dose past its window becomes a nurse task.
     if (!row.escalated_at && overdue >= escalationWindow(plan, row.priority)) {
-      run(
+      await run(
         `UPDATE medication_doses SET status = 'missed', updated_at = datetime('now') WHERE id = ?`,
         row.id,
       );
-      escalateMissedDose(patient, row, medication, plan);
+      await escalateMissedDose(patient, row, medication, plan);
+      escalations += 1;
       continue;
     }
 
     // 2. A snooze that has run out becomes the next reminder.
     if (row.status === 'snoozed') {
       if (row.snoozed_until && row.snoozed_until <= now) {
-        sendDoseReminder(row, medication, patient, row.reminder_count + 1);
+        await sendDoseReminder(row, medication, patient, row.reminder_count + 1);
+        reminders += 1;
       }
       continue;
     }
 
     // 3. First reminder at the scheduled time.
     if (row.reminder_count === 0) {
-      sendDoseReminder(row, medication, patient, 1);
+      await sendDoseReminder(row, medication, patient, 1);
+      reminders += 1;
       continue;
     }
 
@@ -118,13 +126,16 @@ function processMedicationDoses(now) {
       row.last_reminder_at &&
       minutesBetween(row.last_reminder_at, now) >= row.reminder_repeat_minutes
     ) {
-      sendDoseReminder(row, medication, patient, row.reminder_count + 1);
+      await sendDoseReminder(row, medication, patient, row.reminder_count + 1);
+      reminders += 1;
     }
   }
+
+  return { reminders, escalations };
 }
 
-function processMonitoringTasks(now) {
-  const tasks = all(
+async function processMonitoringTasks(now) {
+  const tasks = await all(
     `SELECT t.*, p.user_id, p.first_name, p.last_name, p.hospital_id,
             cp.reminder_repeat_minutes, cp.reminder_max_count, cp.escalate_normal_minutes
        FROM monitoring_tasks t
@@ -136,12 +147,13 @@ function processMonitoringTasks(now) {
   );
 
   const missedToday = new Map();
+  let reminders = 0;
 
   for (const task of tasks) {
     const overdue = minutesBetween(task.scheduled_at, now);
 
     if (overdue >= task.escalate_normal_minutes) {
-      run(
+      await run(
         `UPDATE monitoring_tasks SET status = 'missed', updated_at = datetime('now') WHERE id = ?`,
         task.id,
       );
@@ -163,7 +175,7 @@ function processMonitoringTasks(now) {
 
     if (!shouldRemind) continue;
 
-    notify({
+    await notify({
       userId: task.user_id,
       patientId: task.patient_id,
       type: 'monitoring_reminder',
@@ -172,7 +184,7 @@ function processMonitoringTasks(now) {
       entityType: 'monitoring_task',
       entityId: task.id,
     });
-    run(
+    await run(
       `UPDATE monitoring_tasks
           SET reminder_count = ?, last_reminder_at = ?, updated_at = datetime('now')
         WHERE id = ?`,
@@ -180,52 +192,46 @@ function processMonitoringTasks(now) {
       now,
       task.id,
     );
+    reminders += 1;
   }
 
   for (const [key, count] of missedToday) {
     const [patientId, type] = key.split(':');
-    const totalMissedToday = get(
+    const totalMissedToday = await get(
       `SELECT COUNT(*) AS c FROM monitoring_tasks
         WHERE patient_id = ? AND type = ? AND status = 'missed' AND scheduled_at LIKE ?`,
       Number(patientId),
       type,
       `${toDateKey()}%`,
     );
-    const patient = get('SELECT * FROM patients WHERE id = ?', Number(patientId));
-    const plan = get(
+    const patient = await get('SELECT * FROM patients WHERE id = ?', Number(patientId));
+    const plan = await get(
       `SELECT * FROM care_plans WHERE patient_id = ? AND status = 'active'`,
       Number(patientId),
     );
-    if (patient && plan) evaluateMissedMonitoring(patient, plan, totalMissedToday?.c ?? count, type);
-  }
-}
-
-export function tick() {
-  const now = nowLocal();
-  processMedicationDoses(now);
-  processMonitoringTasks(now);
-}
-
-let timer = null;
-let tickCount = 0;
-
-export function startScheduler() {
-  if (timer) return;
-  generateTasksForAllActivePlans();
-  tick();
-  timer = setInterval(() => {
-    tickCount += 1;
-    try {
-      if (tickCount % REGENERATE_EVERY_TICKS === 0) generateTasksForAllActivePlans();
-      tick();
-    } catch (err) {
-      console.error('[scheduler]', err);
+    if (patient && plan) {
+      await evaluateMissedMonitoring(patient, plan, totalMissedToday?.c ?? count, type);
     }
-  }, TICK_MS);
-  timer.unref?.();
+  }
+
+  return { reminders };
 }
 
-export function stopScheduler() {
-  if (timer) clearInterval(timer);
-  timer = null;
+/**
+ * One pass of the reminder engine. Idempotent and safe to call at any cadence.
+ * `generateTasks` tops up the horizon so a gap between runs cannot leave the
+ * patient without a plan for today.
+ */
+export async function tick({ generate = true } = {}) {
+  const now = nowLocal();
+  const generated = generate ? await generateTasksForAllActivePlans() : 0;
+  const medication = await processMedicationDoses(now);
+  const monitoring = await processMonitoringTasks(now);
+
+  return {
+    ran_at: now,
+    tasks_generated: generated,
+    reminders_sent: medication.reminders + monitoring.reminders,
+    escalations: medication.escalations,
+  };
 }

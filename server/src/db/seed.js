@@ -5,7 +5,7 @@
  * materialisation, the alert engine), so every status, adherence figure and
  * alert on screen is produced by the same code paths the running system uses.
  */
-import { all, db, get, insert, run, transaction } from './index.js';
+import { all, get, insert, run, transaction, closePool, migrate } from './index.js';
 import { hashPassword } from '../lib/auth.js';
 import { addDays, toDateKey } from '../lib/time.js';
 import { approvePlan, createDraftPlan } from '../services/carePlan.js';
@@ -56,7 +56,7 @@ const INSULIN_MEDS = [
   { name: 'Insulin aspart', dose: '8', unit: 'birlik', schedule_type: 'morning_noon', priority: 'critical' },
 ];
 
-function clearDatabase() {
+async function clearDatabase() {
   const tables = [
     'audit_logs', 'ai_recommendations', 'alert_notes', 'alerts', 'notifications',
     'symptom_checks', 'blood_pressure_readings', 'glucose_readings',
@@ -65,13 +65,11 @@ function clearDatabase() {
     'care_plan_versions', 'care_plans', 'caregiver_permissions', 'caregivers',
     'diabetes_profiles', 'patients', 'sessions', 'users', 'hospitals',
   ];
-  db.exec('PRAGMA foreign_keys = OFF');
-  for (const table of tables) db.exec(`DELETE FROM ${table}`);
-  db.exec("DELETE FROM sqlite_sequence WHERE name NOT IN ('')");
-  db.exec('PRAGMA foreign_keys = ON');
+  // TRUNCATE ... CASCADE resets identities too, so ids start from 1 again.
+  await run(`TRUNCATE ${tables.join(', ')} RESTART IDENTITY CASCADE`);
 }
 
-function createStaff(hospitalId) {
+async function createStaff(hospitalId) {
   const make = (role, fullName, phone, password) =>
     insert(
       `INSERT INTO users (hospital_id, role, full_name, phone, password_hash)
@@ -79,10 +77,10 @@ function createStaff(hospitalId) {
       hospitalId, role, fullName, phone, hashPassword(password),
     );
   return {
-    nurse: make('nurse', 'Dilnoza Rahimova', '901112233', 'hamshira'),
-    nurse2: make('nurse', 'Kamola Ergasheva', '901112266', 'hamshira'),
-    doctor: make('doctor', 'Anvar Qodirov', '901112244', 'shifokor'),
-    admin: make('hospital_admin', 'Nodira Yusupova', '901112255', 'admin'),
+    nurse: await make('nurse', 'Dilnoza Rahimova', '901112233', 'hamshira'),
+    nurse2: await make('nurse', 'Kamola Ergasheva', '901112266', 'hamshira'),
+    doctor: await make('doctor', 'Anvar Qodirov', '901112244', 'shifokor'),
+    admin: await make('hospital_admin', 'Nodira Yusupova', '901112255', 'admin'),
   };
 }
 
@@ -127,8 +125,8 @@ function buildMonitoring(diabetesType, insulin, withBp) {
  * Recreates the previous `days` of dose history for an already-approved plan.
  * `adherence` is the probability the patient confirmed a given dose.
  */
-function backfillDoses(patientId, planId, days, adherence, nurseId) {
-  const meds = all(
+async function backfillDoses(patientId, planId, days, adherence, nurseId) {
+  const meds = await all(
     `SELECT m.id, m.priority, s.id AS schedule_id, s.time_of_day
        FROM medications m JOIN medication_schedules s ON s.medication_id = m.id
       WHERE m.care_plan_id = ?`,
@@ -138,11 +136,12 @@ function backfillDoses(patientId, planId, days, adherence, nurseId) {
     const dateKey = toDateKey(addDays(new Date(), -offset));
     for (const med of meds) {
       const taken = chance(adherence);
-      run(
-        `INSERT OR IGNORE INTO medication_doses
+      await run(
+        `INSERT INTO medication_doses
            (patient_id, care_plan_id, medication_id, schedule_id, scheduled_at, status,
             taken_at, reminder_count, last_reminder_at, escalated_at, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING`,
         patientId, planId, med.id, med.schedule_id,
         `${dateKey} ${med.time_of_day}`,
         taken ? 'taken' : 'missed',
@@ -174,8 +173,8 @@ function bpValuesFor(profileKind) {
   return { systolic: between(138, 172), diastolic: between(82, 98) };
 }
 
-function backfillMeasurements(patient, planId, days, profileKind, nurseId) {
-  const times = all(
+async function backfillMeasurements(patient, planId, days, profileKind, nurseId) {
+  const times = await all(
     `SELECT c.type, t.time_of_day, t.context
        FROM monitoring_configs c JOIN monitoring_times t ON t.monitoring_config_id = c.id
       WHERE c.care_plan_id = ? AND c.enabled = 1`,
@@ -191,7 +190,7 @@ function backfillMeasurements(patient, planId, days, profileKind, nurseId) {
       const measuredAt = `${dateKey} ${slot.time_of_day}`;
 
       if (slot.type === 'glucose') {
-        insert(
+        await insert(
           `INSERT INTO glucose_readings
              (patient_id, value, unit, context, measured_at, source, created_by, created_at)
            VALUES (?, ?, 'mg/dL', ?, ?, 'manual', ?, ?)`,
@@ -200,7 +199,7 @@ function backfillMeasurements(patient, planId, days, profileKind, nurseId) {
         );
       } else if (slot.type === 'blood_pressure') {
         const { systolic, diastolic } = bpValuesFor(profileKind);
-        insert(
+        await insert(
           `INSERT INTO blood_pressure_readings
              (patient_id, systolic, diastolic, pulse, measured_at, source, created_by, created_at)
            VALUES (?, ?, ?, ?, ?, 'manual', ?, ?)`,
@@ -212,7 +211,7 @@ function backfillMeasurements(patient, planId, days, profileKind, nurseId) {
           ? 'good'
           : chance(profileKind === 'urgent' ? 0.5 : 0.25) ? 'not_good' : 'good';
         const symptoms = feeling === 'good' ? [] : [pick(['thirst', 'weakness', 'dizziness', 'urination'])];
-        insert(
+        await insert(
           `INSERT INTO symptom_checks
              (patient_id, feeling, symptoms, reported_at, created_by, created_at)
            VALUES (?, ?, ?, ?, ?, ?)`,
@@ -224,9 +223,9 @@ function backfillMeasurements(patient, planId, days, profileKind, nurseId) {
   }
 
   // Mark the measurement tasks that history says were completed.
-  run(
+  await run(
     `UPDATE monitoring_tasks SET status = 'done', completed_at = scheduled_at
-      WHERE patient_id = ? AND scheduled_at < datetime('now', 'localtime')
+      WHERE patient_id = ? AND scheduled_at < datetime('now')
         AND EXISTS (
           SELECT 1 FROM glucose_readings g
            WHERE g.patient_id = monitoring_tasks.patient_id
@@ -237,7 +236,7 @@ function backfillMeasurements(patient, planId, days, profileKind, nurseId) {
 }
 
 /** Records a reading that is deliberately outside the patient's thresholds. */
-function insertOutOfRangeGlucose(patient, nurseId, kind) {
+async function insertOutOfRangeGlucose(patient, nurseId, kind) {
   const measuredAt = new Date();
   measuredAt.setHours(measuredAt.getHours() - 1);
   const stamp = `${toDateKey(measuredAt)} ${String(measuredAt.getHours()).padStart(2, '0')}:${String(measuredAt.getMinutes()).padStart(2, '0')}`;
@@ -246,34 +245,34 @@ function insertOutOfRangeGlucose(patient, nurseId, kind) {
     : kind === 'critical_high'
       ? between(312, 386)
       : between(188, 244);
-  const id = insert(
+  const id = await insert(
     `INSERT INTO glucose_readings
        (patient_id, value, unit, context, measured_at, source, created_by, created_at)
      VALUES (?, ?, 'mg/dL', ?, ?, 'manual', ?, ?)`,
     patient.id, value, kind === 'critical_low' ? 'before_meal' : 'after_meal',
     stamp, patient.user_id ?? nurseId, stamp,
   );
-  return get('SELECT * FROM glucose_readings WHERE id = ?', id);
+  return await get('SELECT * FROM glucose_readings WHERE id = ?', id);
 }
 
 /**
  * Feeds the most recent readings through the real alert engine. Stable patients
  * are left alone — their values never crossed a threshold, so no alert exists.
  */
-function raiseCurrentAlerts(patient, plan, profileKind, nurseId) {
+async function raiseCurrentAlerts(patient, plan, profileKind, nurseId) {
   if (profileKind === 'stable') return;
 
   if (profileKind === 'attention') {
-    const reading = insertOutOfRangeGlucose(patient, nurseId, 'high');
-    evaluateGlucose(patient, reading, plan, { silent: true, createdAt: reading.measured_at });
+    const reading = await insertOutOfRangeGlucose(patient, nurseId, 'high');
+    await evaluateGlucose(patient, reading, plan, { silent: true, createdAt: reading.measured_at });
 
-    const recentSymptom = get(
+    const recentSymptom = await get(
       `SELECT * FROM symptom_checks WHERE patient_id = ? AND feeling != 'good'
         ORDER BY reported_at DESC LIMIT 1`,
       patient.id,
     );
     if (recentSymptom && chance(0.4)) {
-      evaluateSymptomCheck(patient, recentSymptom, plan, {
+      await evaluateSymptomCheck(patient, recentSymptom, plan, {
         silent: true, createdAt: recentSymptom.reported_at,
       });
     }
@@ -282,8 +281,8 @@ function raiseCurrentAlerts(patient, plan, profileKind, nurseId) {
 
   // Urgent: a critical reading. The unconfirmed high-priority dose that turns
   // into a red medication alert is handled by settleTodayDoses.
-  const reading = insertOutOfRangeGlucose(patient, nurseId, chance(0.35) ? 'critical_low' : 'critical_high');
-  evaluateGlucose(patient, reading, plan, { silent: true, createdAt: reading.measured_at });
+  const reading = await insertOutOfRangeGlucose(patient, nurseId, chance(0.35) ? 'critical_low' : 'critical_high');
+  await evaluateGlucose(patient, reading, plan, { silent: true, createdAt: reading.measured_at });
 }
 
 /**
@@ -293,9 +292,9 @@ function raiseCurrentAlerts(patient, plan, profileKind, nurseId) {
  * running scheduler uses, so the resulting nurse alert is a genuine one rather
  * than a fabricated row.
  */
-function settleTodayDoses(patient, plan, adherence, profileKind) {
+async function settleTodayDoses(patient, plan, adherence, profileKind) {
   const nowTime = new Date().toTimeString().slice(0, 5);
-  const doses = all(
+  const doses = await all(
     `SELECT d.*, m.name, m.dose AS med_dose, m.unit, m.priority
        FROM medication_doses d JOIN medications m ON m.id = d.medication_id
       WHERE d.patient_id = ? AND d.scheduled_at LIKE ? AND d.status = 'pending'
@@ -314,13 +313,13 @@ function settleTodayDoses(patient, plan, adherence, profileKind) {
     `UPDATE medication_doses SET status = 'taken', taken_at = ?, reminder_count = 1 WHERE id = ?`,
     dose.scheduled_at, dose.id,
   );
-  const missDose = (dose) => {
-    run(
+  const missDose = async (dose) => {
+    await run(
       `UPDATE medication_doses SET status = 'missed', reminder_count = 2, last_reminder_at = ?
         WHERE id = ?`,
       dose.scheduled_at, dose.id,
     );
-    escalateMissedDose(
+    await escalateMissedDose(
       patient,
       { ...dose, status: 'missed', reminder_count: 2, last_reminder_at: dose.scheduled_at },
       { name: dose.name, dose: dose.med_dose, unit: dose.unit, priority: dose.priority },
@@ -332,21 +331,21 @@ function settleTodayDoses(patient, plan, adherence, profileKind) {
   for (const dose of dueNow) {
     const canMiss = profileKind !== 'stable' && missable.includes(dose);
     if (canMiss && !chance(adherence)) {
-      missDose(dose);
+      await missDose(dose);
       missedAny = true;
     } else {
-      takeDose(dose);
+      await takeDose(dose);
     }
   }
 
   // An urgent patient must actually have an unconfirmed high-priority dose.
   if (profileKind === 'urgent' && !missedAny) {
     const candidate = [...dueNow].reverse().find((d) => d.priority !== 'normal');
-    if (candidate) missDose({ ...candidate, status: 'pending' });
+    if (candidate) await missDose({ ...candidate, status: 'pending' });
   }
 }
 
-function createPatient({ hospitalId, staff, index, profileKind, demo }) {
+async function createPatient({ hospitalId, staff, index, profileKind, demo }) {
   const gender = demo?.gender ?? (chance(0.5) ? 'male' : 'female');
   const firstName = demo?.first_name ?? (gender === 'male' ? pick(MALE_NAMES) : pick(FEMALE_NAMES));
   const surnameRoot = demo?.surname_root ?? pick(SURNAMES);
@@ -361,7 +360,7 @@ function createPatient({ hospitalId, staff, index, profileKind, demo }) {
 
   let userId = null;
   if (demo?.account) {
-    userId = insert(
+    userId = await insert(
       `INSERT INTO users (hospital_id, role, full_name, phone, password_hash, created_by)
        VALUES (?, 'patient', ?, ?, ?, ?)`,
       hospitalId, `${firstName} ${lastName}`, phone,
@@ -369,7 +368,7 @@ function createPatient({ hospitalId, staff, index, profileKind, demo }) {
     );
   }
 
-  const patientId = insert(
+  const patientId = await insert(
     `INSERT INTO patients
        (hospital_id, user_id, first_name, last_name, birth_date, gender, phone, address,
         emergency_contact_name, emergency_contact_phone, discharge_date, created_by)
@@ -383,7 +382,7 @@ function createPatient({ hospitalId, staff, index, profileKind, demo }) {
   );
 
   const priorHypo = chance(profileKind === 'stable' ? 0.1 : 0.4);
-  insert(
+  await insert(
     `INSERT INTO diabetes_profiles
        (patient_id, diabetes_type, diagnosis_date, hba1c, recent_hospitalization,
         prior_hypoglycemia, clinical_notes, cgm_enabled, created_by)
@@ -397,7 +396,7 @@ function createPatient({ hospitalId, staff, index, profileKind, demo }) {
     staff.nurse,
   );
 
-  const planId = createDraftPlan(
+  const planId = await createDraftPlan(
     patientId,
     {
       source: 'ai_assisted',
@@ -408,42 +407,42 @@ function createPatient({ hospitalId, staff, index, profileKind, demo }) {
     },
     { id: staff.nurse },
   );
-  approvePlan(planId, { id: staff.nurse }, 'Dastlabki reja tasdiqlandi');
+  await approvePlan(planId, { id: staff.nurse }, 'Dastlabki reja tasdiqlandi');
 
-  const patient = get('SELECT * FROM patients WHERE id = ?', patientId);
-  const plan = get('SELECT * FROM care_plans WHERE id = ?', planId);
+  const patient = await get('SELECT * FROM patients WHERE id = ?', patientId);
+  const plan = await get('SELECT * FROM care_plans WHERE id = ?', planId);
   const adherence = profileKind === 'stable'
     ? 0.9 + rnd() * 0.09
     : profileKind === 'attention'
       ? 0.62 + rnd() * 0.2
       : 0.38 + rnd() * 0.24;
 
-  backfillDoses(patientId, planId, 14, adherence, staff.nurse);
-  backfillMeasurements(patient, planId, 14, profileKind, staff.nurse);
-  settleTodayDoses(patient, plan, adherence, profileKind);
-  raiseCurrentAlerts(patient, plan, profileKind, staff.nurse);
-  recomputePatientStatus(patientId);
+  await backfillDoses(patientId, planId, 14, adherence, staff.nurse);
+  await backfillMeasurements(patient, planId, 14, profileKind, staff.nurse);
+  await settleTodayDoses(patient, plan, adherence, profileKind);
+  await raiseCurrentAlerts(patient, plan, profileKind, staff.nurse);
+  await recomputePatientStatus(patientId);
 
   return { patientId, userId, planId };
 }
 
-function createCaregiver({ hospitalId, patientId, staff, fullName, phone, password, relation, permissions }) {
-  let user = get('SELECT * FROM users WHERE phone = ?', phone);
+async function createCaregiver({ hospitalId, patientId, staff, fullName, phone, password, relation, permissions }) {
+  let user = await get('SELECT * FROM users WHERE phone = ?', phone);
   if (!user) {
-    const id = insert(
+    const id = await insert(
       `INSERT INTO users (hospital_id, role, full_name, phone, password_hash, created_by)
        VALUES (?, 'caregiver', ?, ?, ?, ?)`,
       hospitalId, fullName, phone, hashPassword(password), staff.nurse,
     );
     user = { id };
   }
-  const caregiverId = insert(
+  const caregiverId = await insert(
     `INSERT INTO caregivers (patient_id, user_id, relation, status, authorized_by, authorized_at, created_by)
      VALUES (?, ?, ?, 'active', ?, datetime('now'), ?)`,
     patientId, user.id, relation, staff.nurse, staff.nurse,
   );
   for (const [key, value] of Object.entries(permissions)) {
-    insert(
+    await insert(
       `INSERT INTO caregiver_permissions (caregiver_id, permission_key, allowed, created_by)
        VALUES (?, ?, ?, ?)`,
       caregiverId, key, value ? 1 : 0, staff.nurse,
@@ -452,15 +451,15 @@ function createCaregiver({ hospitalId, patientId, staff, fullName, phone, passwo
   return caregiverId;
 }
 
-function seed() {
+async function seed() {
   console.log('Shifora: demo ma’lumotlari tayyorlanmoqda...');
-  clearDatabase();
+  await clearDatabase();
 
-  const hospitalId = insert(
+  const hospitalId = await insert(
     `INSERT INTO hospitals (name, region, phone) VALUES (?, ?, ?)`,
     'Toshkent shahar 1-son ko‘p tarmoqli klinikasi', 'Toshkent shahri', '+998 71 200 30 40',
   );
-  const staff = createStaff(hospitalId);
+  const staff = await createStaff(hospitalId);
 
   // 128 patients, split so the dashboard shows a plausible caseload.
   const cohort = [
@@ -470,7 +469,7 @@ function seed() {
   ];
 
   // Two demo patients with real logins, at the front of the caseload.
-  const demoPatient = createPatient({
+  const demoPatient = await createPatient({
     hospitalId, staff, index: 1, profileKind: 'attention',
     demo: {
       first_name: 'Zilola', last_name: 'Karimova', surname_root: 'Karimov', gender: 'female',
@@ -480,7 +479,7 @@ function seed() {
       clinical_notes: 'Uydagi kuzatuv o‘g‘li nazorati ostida olib boriladi.',
     },
   });
-  createCaregiver({
+  await createCaregiver({
     hospitalId, staff, patientId: demoPatient.patientId,
     fullName: 'Sardor Karimov', phone: '901234568', password: 'yaqin', relation: 'O‘g‘li',
     permissions: {
@@ -489,7 +488,7 @@ function seed() {
     },
   });
 
-  const urgentDemo = createPatient({
+  const urgentDemo = await createPatient({
     hospitalId, staff, index: 2, profileKind: 'urgent',
     demo: {
       first_name: 'Bahodir', last_name: 'To‘xtayev', surname_root: 'To‘xtayev', gender: 'male',
@@ -497,7 +496,7 @@ function seed() {
       account: { password: 'bemor' }, cgm_enabled: true,
     },
   });
-  createCaregiver({
+  await createCaregiver({
     hospitalId, staff, patientId: urgentDemo.patientId,
     fullName: 'Nilufar To‘xtayeva', phone: '901234571', password: 'yaqin', relation: 'Qizi',
     permissions: {
@@ -511,19 +510,19 @@ function seed() {
 
   let index = 3;
   for (const profileKind of cohort) {
-    createPatient({ hospitalId, staff, index, profileKind });
+    await createPatient({ hospitalId, staff, index, profileKind });
     index += 1;
     if (index % 25 === 0) console.log(`  ${index} ta bemor yaratildi...`);
   }
 
   // Alerts already worked through, so the alert centre has closed history too.
   // They belong to stable patients, whose live status is unaffected.
-  const settled = all(
+  const settled = await all(
     `SELECT id, hospital_id, first_name, last_name FROM patients
       WHERE status = 'stable' ORDER BY id LIMIT 5`,
   );
   for (const patient of settled) {
-    const alertId = insert(
+    const alertId = await insert(
       `INSERT INTO alerts
          (hospital_id, patient_id, rule_code, severity, title, detail, status,
           assigned_user_id, resolved_at, resolved_by, created_at)
@@ -534,13 +533,13 @@ function seed() {
       staff.nurse, staff.nurse,
       `${toDateKey(addDays(new Date(), -between(2, 9)))} 09:20`,
     );
-    insert(
+    await insert(
       `INSERT INTO alert_notes (alert_id, note, created_by) VALUES (?, ?, ?)`,
       alertId, 'Bemor bilan bog‘lanildi, holati barqaror. Kuzatuv davom etmoqda.', staff.nurse,
     );
   }
 
-  const stats = get(
+  const stats = await get(
     `SELECT COUNT(*) AS total,
             SUM(CASE WHEN status='stable' THEN 1 ELSE 0 END) AS stable,
             SUM(CASE WHEN status='attention' THEN 1 ELSE 0 END) AS attention,
@@ -551,7 +550,8 @@ function seed() {
   console.log('\nTayyor.');
   console.log(`  Jami bemorlar: ${stats.total}`);
   console.log(`  Barqaror: ${stats.stable} | E'tibor kerak: ${stats.attention} | Shoshilinch: ${stats.urgent}`);
-  console.log(`  Ogohlantirishlar: ${get('SELECT COUNT(*) AS c FROM alerts').c}`);
+  const alertCount = await get('SELECT COUNT(*) AS c FROM alerts');
+  console.log(`  Ogohlantirishlar: ${alertCount.c}`);
   console.log('\nDemo hisoblar (telefon / parol):');
   console.log('  Hamshira ............ 901112233 / hamshira');
   console.log('  Shifokor ............ 901112244 / shifokor');
@@ -562,4 +562,6 @@ function seed() {
   console.log('  Yaqin kishi (Nilufar) 901234571 / yaqin');
 }
 
-transaction(seed);
+await await migrate();
+await transaction(seed);
+await closePool();

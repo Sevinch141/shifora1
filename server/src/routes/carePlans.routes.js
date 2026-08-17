@@ -13,7 +13,7 @@ router.use(requireAuth);
 /** The Uzbek schedule presets the registration wizard offers. */
 router.get(
   '/schedule-presets',
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     res.json({
       presets: Object.entries(SCHEDULE_PRESETS).map(([key, value]) => ({
         key,
@@ -28,7 +28,7 @@ router.get(
 router.get(
   '/',
   requireHospitalStaff,
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const { status = 'active', query = '' } = req.query;
     const params = [req.user.hospital_id];
     let sql = `SELECT cp.id, cp.version, cp.status, cp.approved_at, cp.start_date,
@@ -51,17 +51,17 @@ router.get(
       params.push(`%${String(query).trim()}%`);
     }
     sql += ' ORDER BY cp.approved_at DESC, cp.id DESC LIMIT 200';
-    res.json({ plans: all(sql, ...params) });
+    res.json({ plans: await all(sql, ...params) });
   }),
 );
 
 router.get(
   '/:id',
-  wrap((req, res) => {
-    const plan = get('SELECT * FROM care_plans WHERE id = ?', Number(req.params.id));
+  wrap(async (req, res) => {
+    const plan = await get('SELECT * FROM care_plans WHERE id = ?', Number(req.params.id));
     if (!plan) throw notFound('Davolash rejasi topilmadi.');
-    assertPatientAccess(req.user, plan.patient_id, 'view_care_plan');
-    res.json(getPlanDetail(plan.id));
+    await assertPatientAccess(req.user, plan.patient_id, 'view_care_plan');
+    res.json(await getPlanDetail(plan.id));
   }),
 );
 
@@ -73,14 +73,14 @@ router.get(
 router.post(
   '/:id/approve',
   requireRole('nurse', 'doctor'),
-  wrap((req, res) => {
-    const plan = get('SELECT * FROM care_plans WHERE id = ?', Number(req.params.id));
+  wrap(async (req, res) => {
+    const plan = await get('SELECT * FROM care_plans WHERE id = ?', Number(req.params.id));
     if (!plan) throw notFound('Davolash rejasi topilmadi.');
-    assertPatientAccess(req.user, plan.patient_id);
+    await assertPatientAccess(req.user, plan.patient_id);
     if (plan.status === 'archived') throw badRequest('Arxivlangan rejani tasdiqlab bo‘lmaydi.');
 
-    const detail = approvePlan(plan.id, req.user, req.body?.change_reason);
-    audit(req, 'care_plan.approve', 'care_plan', plan.id, {
+    const detail = await approvePlan(plan.id, req.user, req.body?.change_reason);
+    await audit(req, 'care_plan.approve', 'care_plan', plan.id, {
       patient_id: plan.patient_id,
       version: plan.version,
       change_reason: req.body?.change_reason ?? null,
@@ -91,12 +91,12 @@ router.post(
 
 router.get(
   '/:id/versions',
-  wrap((req, res) => {
-    const plan = get('SELECT * FROM care_plans WHERE id = ?', Number(req.params.id));
+  wrap(async (req, res) => {
+    const plan = await get('SELECT * FROM care_plans WHERE id = ?', Number(req.params.id));
     if (!plan) throw notFound('Davolash rejasi topilmadi.');
-    assertPatientAccess(req.user, plan.patient_id, 'view_care_plan');
+    await assertPatientAccess(req.user, plan.patient_id, 'view_care_plan');
     res.json({
-      versions: all(
+      versions: await all(
         `SELECT v.id, v.version, v.change_reason, v.approved_at, u.full_name AS approver
            FROM care_plan_versions v LEFT JOIN users u ON u.id = v.approved_by
           WHERE v.patient_id = ? ORDER BY v.version DESC`,

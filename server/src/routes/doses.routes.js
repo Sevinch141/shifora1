@@ -10,8 +10,8 @@ const router = Router();
 
 router.use(requireAuth);
 
-function loadDose(req) {
-  const dose = get(
+async function loadDose(req) {
+  const dose = await get(
     `SELECT d.*, m.name, m.dose AS med_dose, m.unit, m.priority,
             cp.snooze_minutes, cp.reminder_max_count
        FROM medication_doses d
@@ -21,7 +21,7 @@ function loadDose(req) {
     Number(req.params.id),
   );
   if (!dose) throw notFound('Dori qabul qilish yozuvi topilmadi.');
-  assertPatientAccess(req.user, dose.patient_id, 'view_today_plan');
+  await assertPatientAccess(req.user, dose.patient_id, 'view_today_plan');
   if (req.user.role === 'caregiver') {
     // Caregivers can watch, but confirming a dose is the patient's own action.
     throw badRequest('Dori qabul qilinganini faqat bemor tasdiqlashi mumkin.');
@@ -31,17 +31,17 @@ function loadDose(req) {
 
 router.post(
   '/:id/take',
-  wrap((req, res) => {
-    const dose = loadDose(req);
+  wrap(async (req, res) => {
+    const dose = await loadDose(req);
     if (dose.status === 'taken') return res.json({ ok: true, status: 'taken' });
 
-    run(
+    await run(
       `UPDATE medication_doses
           SET status = 'taken', taken_at = ?, snoozed_until = NULL, updated_at = datetime('now')
         WHERE id = ?`,
       nowLocal(), dose.id,
     );
-    audit(req, 'dose.taken', 'medication_dose', dose.id, { patient_id: dose.patient_id });
+    await audit(req, 'dose.taken', 'medication_dose', dose.id, { patient_id: dose.patient_id });
     res.json({ ok: true, status: 'taken', taken_at: nowLocal() });
   }),
 );
@@ -49,19 +49,19 @@ router.post(
 /** "Kechroq" — postpones by the interval configured on the care plan. */
 router.post(
   '/:id/snooze',
-  wrap((req, res) => {
-    const dose = loadDose(req);
+  wrap(async (req, res) => {
+    const dose = await loadDose(req);
     if (dose.status === 'taken') throw badRequest('Bu dori allaqachon qabul qilingan deb belgilangan.');
 
     const minutes = dose.snooze_minutes ?? 15;
     const until = addMinutes(nowLocal(), minutes);
-    run(
+    await run(
       `UPDATE medication_doses
           SET status = 'snoozed', snoozed_until = ?, updated_at = datetime('now')
         WHERE id = ?`,
       until, dose.id,
     );
-    audit(req, 'dose.snoozed', 'medication_dose', dose.id, { minutes });
+    await audit(req, 'dose.snoozed', 'medication_dose', dose.id, { minutes });
     res.json({ ok: true, status: 'snoozed', snoozed_until: until, minutes });
   }),
 );

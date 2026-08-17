@@ -12,8 +12,8 @@ const router = Router();
 
 router.use(requireAuth);
 
-function selfPatient(req) {
-  const patient = patientForUser(req.user.id);
+async function selfPatient(req) {
+  const patient = await patientForUser(req.user.id);
   if (!patient) throw forbidden('Hisobingiz bemor kartasiga bog‘lanmagan.');
   return patient;
 }
@@ -21,29 +21,29 @@ function selfPatient(req) {
 /** The patient home screen: today's plan, in order. */
 router.get(
   '/today',
-  wrap((req, res) => {
-    const patient = selfPatient(req);
+  wrap(async (req, res) => {
+    const patient = await selfPatient(req);
     const dateKey = req.query.date ?? toDateKey();
     res.json({
       patient: { id: patient.id, first_name: patient.first_name, last_name: patient.last_name },
-      plan: getDailyPlan(patient.id, dateKey),
-      adherence_7d: adherenceRate(patient.id, 7),
-      has_active_plan: Boolean(getActivePlan(patient.id)),
+      plan: await getDailyPlan(patient.id, dateKey),
+      adherence_7d: await adherenceRate(patient.id, 7),
+      has_active_plan: Boolean(await getActivePlan(patient.id)),
     });
   }),
 );
 
 router.get(
   '/medications',
-  wrap((req, res) => {
-    const patient = selfPatient(req);
-    const plan = getActivePlan(patient.id);
+  wrap(async (req, res) => {
+    const patient = await selfPatient(req);
+    const plan = await getActivePlan(patient.id);
     if (!plan) return res.json({ medications: [], plan: null });
-    const detail = getPlanDetail(plan.id);
+    const detail = await getPlanDetail(plan.id);
     res.json({
       plan: { id: plan.id, version: plan.version, approved_at: plan.approved_at },
       medications: detail.medications,
-      history: all(
+      history: await all(
         `SELECT d.id, d.scheduled_at, d.status, d.taken_at, m.name, m.dose, m.unit
            FROM medication_doses d JOIN medications m ON m.id = d.medication_id
           WHERE d.patient_id = ? ORDER BY d.scheduled_at DESC LIMIT 40`,
@@ -55,15 +55,15 @@ router.get(
 
 router.get(
   '/profile',
-  wrap((req, res) => {
-    const patient = selfPatient(req);
-    const plan = getActivePlan(patient.id);
+  wrap(async (req, res) => {
+    const patient = await selfPatient(req);
+    const plan = await getActivePlan(patient.id);
     res.json({
       patient,
-      profile: get('SELECT * FROM diabetes_profiles WHERE patient_id = ?', patient.id),
-      hospital: get('SELECT id, name, phone, region FROM hospitals WHERE id = ?', patient.hospital_id),
+      profile: await get('SELECT * FROM diabetes_profiles WHERE patient_id = ?', patient.id),
+      hospital: await get('SELECT id, name, phone, region FROM hospitals WHERE id = ?', patient.hospital_id),
       care_plan: plan ? { id: plan.id, version: plan.version, approved_at: plan.approved_at } : null,
-      caregivers: all(
+      caregivers: await all(
         `SELECT c.relation, u.full_name, u.phone FROM caregivers c
            JOIN users u ON u.id = c.user_id
           WHERE c.patient_id = ? AND c.status = 'active'`,
@@ -79,8 +79,8 @@ router.get(
 
 router.get(
   '/notifications',
-  wrap((req, res) => {
-    const items = all(
+  wrap(async (req, res) => {
+    const items = await all(
       `SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`,
       req.user.id,
     );
@@ -93,8 +93,8 @@ router.get(
 
 router.post(
   '/notifications/:id/read',
-  wrap((req, res) => {
-    run(
+  wrap(async (req, res) => {
+    await run(
       `UPDATE notifications SET read_at = datetime('now') WHERE id = ? AND user_id = ?`,
       Number(req.params.id), req.user.id,
     );
@@ -104,8 +104,8 @@ router.post(
 
 router.post(
   '/notifications/read-all',
-  wrap((req, res) => {
-    run(
+  wrap(async (req, res) => {
+    await run(
       `UPDATE notifications SET read_at = datetime('now') WHERE user_id = ? AND read_at IS NULL`,
       req.user.id,
     );

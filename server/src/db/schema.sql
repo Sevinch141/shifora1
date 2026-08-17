@@ -1,15 +1,35 @@
 -- Shifora — post-discharge diabetes monitoring platform
--- Relational schema. All clinical records carry created_at / updated_at / created_by.
--- Records that require clinical sign-off also carry approved_by / approved_at.
+-- PostgreSQL schema. All clinical records carry created_at / updated_at /
+-- created_by. Records requiring clinical sign-off also carry approved_by /
+-- approved_at.
+--
+-- Timestamps are stored as TEXT in 'YYYY-MM-DD HH:MM[:SS]' form, in the single
+-- application timezone pinned by src/config.js. The reminder engine compares
+-- these strings directly, and both Node and Postgres must produce identical
+-- ones -- which is what the datetime() helper below guarantees.
 
-PRAGMA foreign_keys = ON;
+-- Compatibility + consistency helper: renders "now" as an application-local
+-- text timestamp, matching nowLocal() in src/lib/time.js. Defined before the
+-- tables because column DEFAULTs reference it.
+CREATE OR REPLACE FUNCTION datetime(marker text DEFAULT 'now')
+RETURNS text
+LANGUAGE sql
+STABLE
+AS $$ SELECT to_char(now(), 'YYYY-MM-DD HH24:MI:SS') $$;
+
+-- Same clock, date only.
+CREATE OR REPLACE FUNCTION date_local()
+RETURNS text
+LANGUAGE sql
+STABLE
+AS $$ SELECT to_char(now(), 'YYYY-MM-DD') $$;
 
 -- ---------------------------------------------------------------------------
 -- Organisations and identity
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS hospitals (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  id            SERIAL PRIMARY KEY,
   name          TEXT NOT NULL,
   region        TEXT,
   phone         TEXT,
@@ -19,7 +39,7 @@ CREATE TABLE IF NOT EXISTS hospitals (
 
 -- role: hospital_admin | doctor | nurse | patient | caregiver
 CREATE TABLE IF NOT EXISTS users (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  id            SERIAL PRIMARY KEY,
   hospital_id   INTEGER REFERENCES hospitals(id) ON DELETE SET NULL,
   role          TEXT NOT NULL,
   full_name     TEXT NOT NULL,
@@ -48,7 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
 -- status: stable | attention | urgent  (monitoring workflow status, NOT a diagnosis)
 CREATE TABLE IF NOT EXISTS patients (
-  id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+  id                      SERIAL PRIMARY KEY,
   hospital_id             INTEGER NOT NULL REFERENCES hospitals(id) ON DELETE CASCADE,
   user_id                 INTEGER REFERENCES users(id) ON DELETE SET NULL,
   first_name              TEXT NOT NULL,
@@ -71,11 +91,11 @@ CREATE INDEX IF NOT EXISTS idx_patients_status ON patients(hospital_id, status);
 
 -- diabetes_type: type1 | type2 | other
 CREATE TABLE IF NOT EXISTS diabetes_profiles (
-  id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+  id                     SERIAL PRIMARY KEY,
   patient_id             INTEGER NOT NULL UNIQUE REFERENCES patients(id) ON DELETE CASCADE,
   diabetes_type          TEXT NOT NULL,
   diagnosis_date         TEXT,
-  hba1c                  REAL,
+  hba1c                  DOUBLE PRECISION,
   recent_hospitalization INTEGER NOT NULL DEFAULT 0,
   prior_hypoglycemia     INTEGER NOT NULL DEFAULT 0,
   clinical_notes         TEXT,
@@ -91,7 +111,7 @@ CREATE TABLE IF NOT EXISTS diabetes_profiles (
 
 -- status: pending | active | revoked
 CREATE TABLE IF NOT EXISTS caregivers (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  id             SERIAL PRIMARY KEY,
   patient_id     INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   relation       TEXT,
@@ -108,7 +128,7 @@ CREATE INDEX IF NOT EXISTS idx_caregivers_user ON caregivers(user_id);
 -- permission_key: view_today_plan | view_adherence | view_alerts
 --                 | view_measurements | view_care_plan | view_clinical_notes
 CREATE TABLE IF NOT EXISTS caregiver_permissions (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  id             SERIAL PRIMARY KEY,
   caregiver_id   INTEGER NOT NULL REFERENCES caregivers(id) ON DELETE CASCADE,
   permission_key TEXT NOT NULL,
   allowed        INTEGER NOT NULL DEFAULT 0,
@@ -125,7 +145,7 @@ CREATE TABLE IF NOT EXISTS caregiver_permissions (
 -- status: draft | active | archived
 -- source: manual | ai_assisted
 CREATE TABLE IF NOT EXISTS care_plans (
-  id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+  id                        SERIAL PRIMARY KEY,
   patient_id                INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   version                   INTEGER NOT NULL,
   status                    TEXT NOT NULL DEFAULT 'draft',
@@ -151,7 +171,7 @@ CREATE INDEX IF NOT EXISTS idx_care_plans_patient ON care_plans(patient_id, stat
 
 -- Immutable snapshot of the plan at the moment it was approved (audit trail).
 CREATE TABLE IF NOT EXISTS care_plan_versions (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  id            SERIAL PRIMARY KEY,
   care_plan_id  INTEGER NOT NULL REFERENCES care_plans(id) ON DELETE CASCADE,
   patient_id    INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   version       INTEGER NOT NULL,
@@ -168,7 +188,7 @@ CREATE INDEX IF NOT EXISTS idx_cpv_patient ON care_plan_versions(patient_id);
 -- schedule_type: morning | morning_noon | morning_evening | noon | noon_evening
 --                | evening | bedtime | every_8h | every_12h | as_needed | custom
 CREATE TABLE IF NOT EXISTS medications (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  id            SERIAL PRIMARY KEY,
   care_plan_id  INTEGER NOT NULL REFERENCES care_plans(id) ON DELETE CASCADE,
   name          TEXT NOT NULL,
   dose          TEXT NOT NULL,
@@ -187,7 +207,7 @@ CREATE INDEX IF NOT EXISTS idx_medications_plan ON medications(care_plan_id);
 
 -- The schedule preset ("Ertalab") and the actual reminder clock time are separate.
 CREATE TABLE IF NOT EXISTS medication_schedules (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  id             SERIAL PRIMARY KEY,
   medication_id  INTEGER NOT NULL REFERENCES medications(id) ON DELETE CASCADE,
   time_of_day    TEXT NOT NULL,          -- 'HH:MM' — configured by the nurse
   label          TEXT,                   -- optional note e.g. "ovqatdan keyin"
@@ -199,7 +219,7 @@ CREATE INDEX IF NOT EXISTS idx_med_sched_med ON medication_schedules(medication_
 
 -- type: glucose | blood_pressure | symptom
 CREATE TABLE IF NOT EXISTS monitoring_configs (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  id                SERIAL PRIMARY KEY,
   care_plan_id      INTEGER NOT NULL REFERENCES care_plans(id) ON DELETE CASCADE,
   type              TEXT NOT NULL,
   enabled           INTEGER NOT NULL DEFAULT 0,
@@ -213,7 +233,7 @@ CREATE TABLE IF NOT EXISTS monitoring_configs (
 
 -- context: fasting | before_meal | after_meal | bedtime | any
 CREATE TABLE IF NOT EXISTS monitoring_times (
-  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  id                   SERIAL PRIMARY KEY,
   monitoring_config_id INTEGER NOT NULL REFERENCES monitoring_configs(id) ON DELETE CASCADE,
   time_of_day          TEXT NOT NULL,
   context              TEXT NOT NULL DEFAULT 'any',
@@ -226,13 +246,13 @@ CREATE TABLE IF NOT EXISTS monitoring_times (
 --       | bp_high | bp_critical_high | symptom_bad | medication_missed
 -- severity: info | warning | urgent
 CREATE TABLE IF NOT EXISTS alert_rules (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  id            SERIAL PRIMARY KEY,
   care_plan_id  INTEGER NOT NULL REFERENCES care_plans(id) ON DELETE CASCADE,
   code          TEXT NOT NULL,
   enabled       INTEGER NOT NULL DEFAULT 1,
   comparator    TEXT,                    -- 'lt' | 'gt' | 'eq'
-  value_1       REAL,
-  value_2       REAL,
+  value_1       DOUBLE PRECISION,
+  value_2       DOUBLE PRECISION,
   severity      TEXT NOT NULL DEFAULT 'warning',
   message_uz    TEXT NOT NULL,
   approved_by   INTEGER REFERENCES users(id),
@@ -249,7 +269,7 @@ CREATE TABLE IF NOT EXISTS alert_rules (
 
 -- status: pending | taken | snoozed | missed | skipped
 CREATE TABLE IF NOT EXISTS medication_doses (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  id                SERIAL PRIMARY KEY,
   patient_id        INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   care_plan_id      INTEGER NOT NULL REFERENCES care_plans(id) ON DELETE CASCADE,
   medication_id     INTEGER NOT NULL REFERENCES medications(id) ON DELETE CASCADE,
@@ -272,7 +292,7 @@ CREATE INDEX IF NOT EXISTS idx_doses_status ON medication_doses(status, schedule
 
 -- type: glucose | blood_pressure | symptom ; status: pending | done | missed
 CREATE TABLE IF NOT EXISTS monitoring_tasks (
-  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  id               SERIAL PRIMARY KEY,
   patient_id       INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   care_plan_id     INTEGER NOT NULL REFERENCES care_plans(id) ON DELETE CASCADE,
   type             TEXT NOT NULL,
@@ -296,9 +316,9 @@ CREATE INDEX IF NOT EXISTS idx_mtasks_patient_time ON monitoring_tasks(patient_i
 
 -- source: manual | glucometer | cgm | wearable   (only 'manual' is implemented)
 CREATE TABLE IF NOT EXISTS glucose_readings (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  id           SERIAL PRIMARY KEY,
   patient_id   INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
-  value        REAL NOT NULL,
+  value        DOUBLE PRECISION NOT NULL,
   unit         TEXT NOT NULL DEFAULT 'mg/dL',
   context      TEXT NOT NULL DEFAULT 'any',   -- fasting | before_meal | after_meal | bedtime | any
   measured_at  TEXT NOT NULL,
@@ -312,7 +332,7 @@ CREATE TABLE IF NOT EXISTS glucose_readings (
 CREATE INDEX IF NOT EXISTS idx_glucose_patient ON glucose_readings(patient_id, measured_at);
 
 CREATE TABLE IF NOT EXISTS blood_pressure_readings (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  id           SERIAL PRIMARY KEY,
   patient_id   INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   systolic     INTEGER NOT NULL,
   diastolic    INTEGER NOT NULL,
@@ -329,7 +349,7 @@ CREATE INDEX IF NOT EXISTS idx_bp_patient ON blood_pressure_readings(patient_id,
 
 -- feeling: good | not_good | bad
 CREATE TABLE IF NOT EXISTS symptom_checks (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  id           SERIAL PRIMARY KEY,
   patient_id   INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   feeling      TEXT NOT NULL,
   symptoms     TEXT NOT NULL DEFAULT '[]',   -- JSON array of symptom keys
@@ -347,7 +367,7 @@ CREATE INDEX IF NOT EXISTS idx_symptoms_patient ON symptom_checks(patient_id, re
 
 -- channel: in_app  (sms / telegram / push providers can register later)
 CREATE TABLE IF NOT EXISTS notifications (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  id           SERIAL PRIMARY KEY,
   user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   patient_id   INTEGER REFERENCES patients(id) ON DELETE CASCADE,
   channel      TEXT NOT NULL DEFAULT 'in_app',
@@ -364,7 +384,7 @@ CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, read_at);
 -- severity: info | warning | urgent  → Ma'lumot | E'tibor kerak | Shoshilinch
 -- status:   new | in_review | contacted | closed
 CREATE TABLE IF NOT EXISTS alerts (
-  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  id               SERIAL PRIMARY KEY,
   hospital_id      INTEGER NOT NULL REFERENCES hospitals(id) ON DELETE CASCADE,
   patient_id       INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   care_plan_id     INTEGER REFERENCES care_plans(id) ON DELETE SET NULL,
@@ -387,7 +407,7 @@ CREATE INDEX IF NOT EXISTS idx_alerts_patient ON alerts(patient_id, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_dedup ON alerts(dedup_key) WHERE dedup_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS alert_notes (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  id          SERIAL PRIMARY KEY,
   alert_id    INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
   note        TEXT NOT NULL,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -402,7 +422,7 @@ CREATE INDEX IF NOT EXISTS idx_alert_notes_alert ON alert_notes(alert_id);
 -- kind: care_plan | adherence_summary | glucose_trend | general_summary
 -- status: suggested | accepted | modified | rejected
 CREATE TABLE IF NOT EXISTS ai_recommendations (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  id           SERIAL PRIMARY KEY,
   patient_id   INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   care_plan_id INTEGER REFERENCES care_plans(id) ON DELETE SET NULL,
   kind         TEXT NOT NULL,
@@ -423,7 +443,7 @@ CREATE INDEX IF NOT EXISTS idx_ai_patient ON ai_recommendations(patient_id, crea
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS audit_logs (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  id          SERIAL PRIMARY KEY,
   user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
   hospital_id INTEGER REFERENCES hospitals(id) ON DELETE SET NULL,
   action      TEXT NOT NULL,

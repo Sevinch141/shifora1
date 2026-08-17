@@ -29,8 +29,8 @@ export function getCaregiverLink(userId, patientId) {
   );
 }
 
-export function caregiverPermissions(caregiverId) {
-  const rows = all(
+export async function caregiverPermissions(caregiverId) {
+  const rows = await all(
     'SELECT permission_key, allowed FROM caregiver_permissions WHERE caregiver_id = ?',
     caregiverId,
   );
@@ -45,8 +45,8 @@ export function caregiverPermissions(caregiverId) {
  * Hospital staff see only their own hospital; patients see only themselves;
  * caregivers see only what they were explicitly granted.
  */
-export function assertPatientAccess(user, patientId, permission) {
-  const patient = get('SELECT * FROM patients WHERE id = ?', Number(patientId));
+export async function assertPatientAccess(user, patientId, permission) {
+  const patient = await get('SELECT * FROM patients WHERE id = ?', Number(patientId));
   if (!patient) throw notFound('Bemor topilmadi.');
 
   if (HOSPITAL_ROLES.includes(user.role)) {
@@ -62,9 +62,9 @@ export function assertPatientAccess(user, patientId, permission) {
   }
 
   if (user.role === 'caregiver') {
-    const link = getCaregiverLink(user.id, patient.id);
+    const link = await getCaregiverLink(user.id, patient.id);
     if (!link) throw forbidden('Siz bu bemorga biriktirilmagansiz.');
-    const permissions = caregiverPermissions(link.id);
+    const permissions = await caregiverPermissions(link.id);
     if (permission && !permissions[permission]) {
       throw forbidden("Bemor sizga bu ma'lumotni ko'rish huquqini bermagan.");
     }

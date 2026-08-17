@@ -32,7 +32,7 @@ export const SCHEDULE_PRESETS = {
 
 export const PLAN_HORIZON_DAYS = 3;
 
-export function getActivePlan(patientId) {
+export async function getActivePlan(patientId) {
   return get(
     `SELECT * FROM care_plans WHERE patient_id = ? AND status = 'active'
       ORDER BY version DESC LIMIT 1`,
@@ -40,42 +40,50 @@ export function getActivePlan(patientId) {
   );
 }
 
-export function getPlanDetail(planId) {
-  const plan = get('SELECT * FROM care_plans WHERE id = ?', planId);
+export async function getPlanDetail(planId) {
+  const plan = await get('SELECT * FROM care_plans WHERE id = ?', planId);
   if (!plan) return null;
 
-  const medications = all(
+  const medicationRows = await all(
     'SELECT * FROM medications WHERE care_plan_id = ? ORDER BY id',
     planId,
-  ).map((med) => ({
-    ...med,
-    schedules: all(
-      'SELECT * FROM medication_schedules WHERE medication_id = ? ORDER BY time_of_day',
-      med.id,
-    ),
-  }));
+  );
+  const medications = [];
+  for (const med of medicationRows) {
+    medications.push({
+      ...med,
+      schedules: await all(
+        'SELECT * FROM medication_schedules WHERE medication_id = ? ORDER BY time_of_day',
+        med.id,
+      ),
+    });
+  }
 
-  const monitoring = all(
+  const monitoringRows = await all(
     'SELECT * FROM monitoring_configs WHERE care_plan_id = ? ORDER BY id',
     planId,
-  ).map((config) => ({
-    ...config,
-    times: all(
-      'SELECT * FROM monitoring_times WHERE monitoring_config_id = ? ORDER BY time_of_day',
-      config.id,
-    ),
-  }));
+  );
+  const monitoring = [];
+  for (const config of monitoringRows) {
+    monitoring.push({
+      ...config,
+      times: await all(
+        'SELECT * FROM monitoring_times WHERE monitoring_config_id = ? ORDER BY time_of_day',
+        config.id,
+      ),
+    });
+  }
 
-  const rules = all('SELECT * FROM alert_rules WHERE care_plan_id = ? ORDER BY code', planId);
+  const rules = await all('SELECT * FROM alert_rules WHERE care_plan_id = ? ORDER BY code', planId);
   const approver = plan.approved_by
-    ? get('SELECT id, full_name, role FROM users WHERE id = ?', plan.approved_by)
+    ? await get('SELECT id, full_name, role FROM users WHERE id = ?', plan.approved_by)
     : null;
 
   return { ...plan, medications, monitoring, rules, approver };
 }
 
-function nextVersion(patientId) {
-  const row = get('SELECT MAX(version) AS v FROM care_plans WHERE patient_id = ?', patientId);
+async function nextVersion(patientId) {
+  const row = await get('SELECT MAX(version) AS v FROM care_plans WHERE patient_id = ?', patientId);
   return (row?.v ?? 0) + 1;
 }
 
@@ -83,10 +91,10 @@ function nextVersion(patientId) {
  * Creates a new DRAFT plan version. Draft plans generate no reminders — the
  * patient is only ever driven by an approved, active plan.
  */
-export function createDraftPlan(patientId, payload, user) {
-  return transaction(() => {
-    const version = nextVersion(patientId);
-    const planId = insert(
+export async function createDraftPlan(patientId, payload, user) {
+  return transaction(async () => {
+    const version = await nextVersion(patientId);
+    const planId = await insert(
       `INSERT INTO care_plans
          (patient_id, version, status, source, start_date, end_date, notes,
           reminder_repeat_minutes, reminder_max_count, snooze_minutes,
@@ -111,7 +119,7 @@ export function createDraftPlan(patientId, payload, user) {
     for (const med of payload.medications ?? []) {
       const preset = SCHEDULE_PRESETS[med.schedule_type] ?? SCHEDULE_PRESETS.morning;
       const times = (med.times?.length ? med.times : preset.times).filter(Boolean);
-      const medId = insert(
+      const medId = await insert(
         `INSERT INTO medications
            (care_plan_id, name, dose, unit, doses_per_day, schedule_type, priority,
             start_date, end_date, notes, created_by)
@@ -129,7 +137,7 @@ export function createDraftPlan(patientId, payload, user) {
         user?.id ?? null,
       );
       for (const time of times) {
-        insert(
+        await insert(
           `INSERT INTO medication_schedules (medication_id, time_of_day, label, created_by)
            VALUES (?, ?, ?, ?)`,
           medId,
@@ -141,7 +149,7 @@ export function createDraftPlan(patientId, payload, user) {
     }
 
     for (const config of payload.monitoring ?? []) {
-      const configId = insert(
+      const configId = await insert(
         `INSERT INTO monitoring_configs
            (care_plan_id, type, enabled, frequency_per_day, notes, created_by)
          VALUES (?, ?, ?, ?, ?, ?)`,
@@ -153,7 +161,7 @@ export function createDraftPlan(patientId, payload, user) {
         user?.id ?? null,
       );
       for (const time of config.times ?? []) {
-        insert(
+        await insert(
           `INSERT INTO monitoring_times (monitoring_config_id, time_of_day, context, created_by)
            VALUES (?, ?, ?, ?)`,
           configId,
@@ -164,11 +172,11 @@ export function createDraftPlan(patientId, payload, user) {
       }
     }
 
-    createDefaultRules(planId, user?.id);
+    await createDefaultRules(planId, user?.id);
 
     // Thresholds supplied by staff override the offered defaults.
     for (const rule of payload.rules ?? []) {
-      run(
+      await run(
         `UPDATE alert_rules
             SET enabled = ?, value_1 = ?, value_2 = ?, severity = COALESCE(?, severity),
                 updated_at = datetime('now')
@@ -191,26 +199,26 @@ export function createDraftPlan(patientId, payload, user) {
  * immutable snapshot with the approving professional, and generates the
  * patient's upcoming tasks.
  */
-export function approvePlan(planId, user, changeReason) {
-  const plan = get('SELECT * FROM care_plans WHERE id = ?', planId);
+export async function approvePlan(planId, user, changeReason) {
+  const plan = await get('SELECT * FROM care_plans WHERE id = ?', planId);
   if (!plan) return null;
 
-  transaction(() => {
-    const previous = getActivePlan(plan.patient_id);
+  await transaction(async () => {
+    const previous = await getActivePlan(plan.patient_id);
     if (previous && previous.id !== planId) {
-      run(
+      await run(
         `UPDATE care_plans SET status = 'archived', updated_at = datetime('now') WHERE id = ?`,
         previous.id,
       );
       // Future, untouched tasks from the superseded plan are removed so the
       // patient is not driven by two plans at once. History stays intact.
-      run(
+      await run(
         `DELETE FROM medication_doses
           WHERE care_plan_id = ? AND status = 'pending' AND scheduled_at > ?`,
         previous.id,
         nowLocal(),
       );
-      run(
+      await run(
         `DELETE FROM monitoring_tasks
           WHERE care_plan_id = ? AND status = 'pending' AND scheduled_at > ?`,
         previous.id,
@@ -218,7 +226,7 @@ export function approvePlan(planId, user, changeReason) {
       );
     }
 
-    run(
+    await run(
       `UPDATE care_plans
           SET status = 'active', approved_by = ?, approved_at = datetime('now'),
               updated_at = datetime('now')
@@ -227,8 +235,8 @@ export function approvePlan(planId, user, changeReason) {
       planId,
     );
 
-    const snapshot = getPlanDetail(planId);
-    insert(
+    const snapshot = await getPlanDetail(planId);
+    await insert(
       `INSERT INTO care_plan_versions
          (care_plan_id, patient_id, version, snapshot_json, change_reason,
           approved_by, approved_at, created_by)
@@ -243,7 +251,7 @@ export function approvePlan(planId, user, changeReason) {
     );
   });
 
-  generateTasks(planId, PLAN_HORIZON_DAYS);
+  await generateTasks(planId, PLAN_HORIZON_DAYS);
   return getPlanDetail(planId);
 }
 
@@ -257,18 +265,18 @@ function medicationActiveOn(med, dateKey) {
  * Materialises the concrete dose and measurement instances the patient sees.
  * Idempotent — a unique constraint keeps repeated runs from duplicating rows.
  */
-export function generateTasks(planId, days = PLAN_HORIZON_DAYS, fromDate = new Date()) {
-  const plan = get('SELECT * FROM care_plans WHERE id = ?', planId);
+export async function generateTasks(planId, days = PLAN_HORIZON_DAYS, fromDate = new Date()) {
+  const plan = await get('SELECT * FROM care_plans WHERE id = ?', planId);
   if (!plan || plan.status !== 'active') return 0;
 
-  const medications = all(
+  const medications = await all(
     `SELECT m.*, s.id AS schedule_id, s.time_of_day
        FROM medications m
        JOIN medication_schedules s ON s.medication_id = m.id
       WHERE m.care_plan_id = ? AND m.schedule_type != 'as_needed'`,
     planId,
   );
-  const monitoring = all(
+  const monitoring = await all(
     `SELECT c.type, t.time_of_day, t.context
        FROM monitoring_configs c
        JOIN monitoring_times t ON t.monitoring_config_id = c.id
@@ -284,10 +292,11 @@ export function generateTasks(planId, days = PLAN_HORIZON_DAYS, fromDate = new D
 
     for (const med of medications) {
       if (!medicationActiveOn(med, dateKey)) continue;
-      const result = run(
-        `INSERT OR IGNORE INTO medication_doses
+      const result = await run(
+        `INSERT INTO medication_doses
            (patient_id, care_plan_id, medication_id, schedule_id, scheduled_at, status, created_by)
-         VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+         VALUES (?, ?, ?, ?, ?, 'pending', ?)
+         ON CONFLICT DO NOTHING`,
         plan.patient_id,
         planId,
         med.id,
@@ -299,10 +308,11 @@ export function generateTasks(planId, days = PLAN_HORIZON_DAYS, fromDate = new D
     }
 
     for (const item of monitoring) {
-      const result = run(
-        `INSERT OR IGNORE INTO monitoring_tasks
+      const result = await run(
+        `INSERT INTO monitoring_tasks
            (patient_id, care_plan_id, type, context, scheduled_at, status, created_by)
-         VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+         VALUES (?, ?, ?, ?, ?, 'pending', ?)
+         ON CONFLICT DO NOTHING`,
         plan.patient_id,
         planId,
         item.type,
@@ -317,9 +327,9 @@ export function generateTasks(planId, days = PLAN_HORIZON_DAYS, fromDate = new D
 }
 
 /** Keeps every active plan stocked with upcoming tasks. */
-export function generateTasksForAllActivePlans() {
-  const plans = all("SELECT id FROM care_plans WHERE status = 'active'");
+export async function generateTasksForAllActivePlans() {
+  const plans = await all("SELECT id FROM care_plans WHERE status = 'active'");
   let created = 0;
-  for (const plan of plans) created += generateTasks(plan.id, PLAN_HORIZON_DAYS);
+  for (const plan of plans) created += await generateTasks(plan.id, PLAN_HORIZON_DAYS);
   return created;
 }

@@ -88,12 +88,13 @@ export function defaultAlertRules() {
   ];
 }
 
-export function createDefaultRules(carePlanId, createdBy) {
+export async function createDefaultRules(carePlanId, createdBy) {
   for (const rule of defaultAlertRules()) {
-    insert(
-      `INSERT OR IGNORE INTO alert_rules
+    await insert(
+      `INSERT INTO alert_rules
          (care_plan_id, code, enabled, comparator, value_1, value_2, severity, message_uz, created_by)
-       VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING`,
       carePlanId,
       rule.code,
       rule.comparator,
@@ -106,16 +107,16 @@ export function createDefaultRules(carePlanId, createdBy) {
   }
 }
 
-function rulesFor(carePlanId) {
-  const rows = all('SELECT * FROM alert_rules WHERE care_plan_id = ? AND enabled = 1', carePlanId);
+async function rulesFor(carePlanId) {
+  const rows = await all('SELECT * FROM alert_rules WHERE care_plan_id = ? AND enabled = 1', carePlanId);
   const map = {};
   for (const row of rows) map[row.code] = row;
   return map;
 }
 
 /** Recomputes the patient's monitoring workflow status from open alerts. */
-export function recomputePatientStatus(patientId) {
-  const open = all(
+export async function recomputePatientStatus(patientId) {
+  const open = await all(
     `SELECT severity FROM alerts WHERE patient_id = ? AND status != 'closed'`,
     patientId,
   );
@@ -124,7 +125,7 @@ export function recomputePatientStatus(patientId) {
     if (row.severity === 'urgent') { status = 'urgent'; break; }
     if (row.severity === 'warning') status = 'attention';
   }
-  run(
+  await run(
     "UPDATE patients SET status = ?, updated_at = datetime('now') WHERE id = ?",
     status,
     patientId,
@@ -132,14 +133,14 @@ export function recomputePatientStatus(patientId) {
   return status;
 }
 
-function notifyStaff(patient, alertId, title, detail, severity) {
-  const staff = all(
+async function notifyStaff(patient, alertId, title, detail, severity) {
+  const staff = await all(
     `SELECT id FROM users
       WHERE hospital_id = ? AND is_active = 1 AND role IN ('nurse', 'doctor')`,
     patient.hospital_id,
   );
   for (const member of staff) {
-    notify({
+    await notify({
       userId: member.id,
       patientId: patient.id,
       type: severity === 'urgent' ? 'alert_urgent' : 'alert',
@@ -151,14 +152,14 @@ function notifyStaff(patient, alertId, title, detail, severity) {
   }
 }
 
-function notifyCaregivers(patient, alertId, title, detail) {
-  const links = all(
+async function notifyCaregivers(patient, alertId, title, detail) {
+  const links = await all(
     `SELECT * FROM caregivers WHERE patient_id = ? AND status = 'active'`,
     patient.id,
   );
   for (const link of links) {
-    if (!caregiverPermissions(link.id).view_alerts) continue;
-    notify({
+    if (!(await caregiverPermissions(link.id)).view_alerts) continue;
+    await notify({
       userId: link.user_id,
       patientId: patient.id,
       type: 'alert',
@@ -175,7 +176,7 @@ function notifyCaregivers(patient, alertId, title, detail) {
  * open it is updated rather than duplicated, so a nurse sees one live item per
  * problem instead of a flood.
  */
-export function raiseAlert({
+export async function raiseAlert({
   patient,
   carePlanId = null,
   code,
@@ -188,11 +189,11 @@ export function raiseAlert({
   createdAt = null,
 }) {
   if (dedupKey) {
-    const existing = get('SELECT * FROM alerts WHERE dedup_key = ?', dedupKey);
+    const existing = await get('SELECT * FROM alerts WHERE dedup_key = ?', dedupKey);
     if (existing) {
       const nextSeverity =
         SEVERITY_ORDER[severity] > SEVERITY_ORDER[existing.severity] ? severity : existing.severity;
-      run(
+      await run(
         `UPDATE alerts SET detail = ?, severity = ?, context_json = ?, updated_at = datetime('now')
           WHERE id = ?`,
         detail,
@@ -200,12 +201,12 @@ export function raiseAlert({
         context ? JSON.stringify(context) : existing.context_json,
         existing.id,
       );
-      recomputePatientStatus(patient.id);
+      await recomputePatientStatus(patient.id);
       return existing.id;
     }
   }
 
-  const alertId = insert(
+  const alertId = await insert(
     `INSERT INTO alerts
        (hospital_id, patient_id, care_plan_id, rule_code, severity, title, detail,
         context_json, status, dedup_key, created_at)
@@ -222,19 +223,19 @@ export function raiseAlert({
     createdAt,
   );
 
-  recomputePatientStatus(patient.id);
+  await recomputePatientStatus(patient.id);
 
   if (!silent) {
     const who = `${patient.first_name} ${patient.last_name}`;
-    notifyStaff(patient, alertId, title, `${who}: ${detail}`, severity);
-    notifyCaregivers(patient, alertId, title, detail);
+    await notifyStaff(patient, alertId, title, `${who}: ${detail}`, severity);
+    await notifyCaregivers(patient, alertId, title, detail);
   }
   return alertId;
 }
 
 /** Closing an alert frees its dedup key so a later recurrence can be raised. */
-export function closeAlert(alertId, userId) {
-  run(
+export async function closeAlert(alertId, userId) {
+  await run(
     `UPDATE alerts
         SET status = 'closed', resolved_at = datetime('now'), resolved_by = ?,
             dedup_key = NULL, updated_at = datetime('now')
@@ -242,8 +243,8 @@ export function closeAlert(alertId, userId) {
     userId,
     alertId,
   );
-  const alert = get('SELECT patient_id FROM alerts WHERE id = ?', alertId);
-  if (alert) recomputePatientStatus(alert.patient_id);
+  const alert = await get('SELECT patient_id FROM alerts WHERE id = ?', alertId);
+  if (alert) await recomputePatientStatus(alert.patient_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -258,9 +259,9 @@ const GLUCOSE_CONTEXT_UZ = {
   any: 'belgilanmagan',
 };
 
-export function evaluateGlucose(patient, reading, carePlan, options = {}) {
+export async function evaluateGlucose(patient, reading, carePlan, options = {}) {
   if (!carePlan) return null;
-  const rules = rulesFor(carePlan.id);
+  const rules = await rulesFor(carePlan.id);
   const value = reading.value;
   const ordered = ['glucose_critical_low', 'glucose_critical_high', 'glucose_low', 'glucose_high'];
 
@@ -269,7 +270,7 @@ export function evaluateGlucose(patient, reading, carePlan, options = {}) {
     if (!rule) continue;
     const hit = rule.comparator === 'lt' ? value < rule.value_1 : value > rule.value_1;
     if (!hit) continue;
-    return raiseAlert({
+    return await raiseAlert({
       patient,
       carePlanId: carePlan.id,
       code,
@@ -285,15 +286,15 @@ export function evaluateGlucose(patient, reading, carePlan, options = {}) {
   return null;
 }
 
-export function evaluateBloodPressure(patient, reading, carePlan, options = {}) {
+export async function evaluateBloodPressure(patient, reading, carePlan, options = {}) {
   if (!carePlan) return null;
-  const rules = rulesFor(carePlan.id);
+  const rules = await rulesFor(carePlan.id);
   for (const code of ['bp_critical_high', 'bp_high']) {
     const rule = rules[code];
     if (!rule) continue;
     const hit = reading.systolic > rule.value_1 || reading.diastolic > rule.value_2;
     if (!hit) continue;
-    return raiseAlert({
+    return await raiseAlert({
       patient,
       carePlanId: carePlan.id,
       code,
@@ -325,9 +326,9 @@ export const SYMPTOM_LABELS_UZ = {
   other: 'Boshqa',
 };
 
-export function evaluateSymptomCheck(patient, check, carePlan, options = {}) {
+export async function evaluateSymptomCheck(patient, check, carePlan, options = {}) {
   if (!carePlan || check.feeling === 'good') return null;
-  const rules = rulesFor(carePlan.id);
+  const rules = await rulesFor(carePlan.id);
   const code = check.feeling === 'bad' ? 'symptom_urgent' : 'symptom_attention';
   const rule = rules[code];
   if (!rule) return null;
@@ -338,7 +339,7 @@ export function evaluateSymptomCheck(patient, check, carePlan, options = {}) {
     ? `${rule.message_uz} Belgilar: ${labels.join(', ')}.`
     : rule.message_uz;
 
-  return raiseAlert({
+  return await raiseAlert({
     patient,
     carePlanId: carePlan.id,
     code,
@@ -353,12 +354,12 @@ export function evaluateSymptomCheck(patient, check, carePlan, options = {}) {
 }
 
 /** Raised when the patient repeatedly skips required measurements. */
-export function evaluateMissedMonitoring(patient, carePlan, missedCount, type) {
+export async function evaluateMissedMonitoring(patient, carePlan, missedCount, type) {
   if (!carePlan) return null;
-  const rule = rulesFor(carePlan.id).monitoring_missed;
+  const rule = (await rulesFor(carePlan.id)).monitoring_missed;
   if (!rule || missedCount <= rule.value_1) return null;
   const typeUz = { glucose: 'Glyukoza', blood_pressure: 'Qon bosimi', symptom: 'Belgilar' }[type] ?? type;
-  return raiseAlert({
+  return await raiseAlert({
     patient,
     carePlanId: carePlan.id,
     code: 'monitoring_missed',
@@ -376,7 +377,7 @@ const PRIORITY_UZ = { normal: 'Oddiy', important: 'Muhim', critical: 'Juda muhim
  * Escalation for an unconfirmed dose. The system never advises the patient to
  * take an extra dose and never changes a dose — it reports the facts to a nurse.
  */
-export function escalateMissedDose(patient, dose, medication, carePlan) {
+export async function escalateMissedDose(patient, dose, medication, carePlan) {
   const severity = medication.priority === 'critical'
     ? 'urgent'
     : medication.priority === 'important'
@@ -386,7 +387,7 @@ export function escalateMissedDose(patient, dose, medication, carePlan) {
     ? 'Juda muhim dori qabul qilingani tasdiqlanmadi'
     : 'Dori qabul qilingani tasdiqlanmadi';
 
-  const alertId = raiseAlert({
+  const alertId = await raiseAlert({
     patient,
     carePlanId: carePlan?.id ?? dose.care_plan_id,
     code: 'medication_missed',
@@ -405,7 +406,7 @@ export function escalateMissedDose(patient, dose, medication, carePlan) {
     dedupKey: `medication_missed:${dose.id}`,
   });
 
-  run(
+  await run(
     "UPDATE medication_doses SET escalated_at = ?, updated_at = datetime('now') WHERE id = ?",
     nowLocal(),
     dose.id,

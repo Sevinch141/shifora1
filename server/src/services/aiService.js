@@ -180,8 +180,8 @@ function pct(part, total) {
   return total > 0 ? Math.round((part / total) * 100) : null;
 }
 
-function adherenceBetween(patientId, fromKey, toKey) {
-  const row = get(
+async function adherenceBetween(patientId, fromKey, toKey) {
+  const row = await get(
     `SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'taken' THEN 1 ELSE 0 END) AS taken
        FROM medication_doses
       WHERE patient_id = ? AND scheduled_at >= ? AND scheduled_at < ?`,
@@ -193,14 +193,14 @@ function adherenceBetween(patientId, fromKey, toKey) {
 }
 
 /** Pattern summaries for the nurse. Descriptive only — never instructions. */
-function summarizePatient(patientId) {
+async function summarizePatient(patientId) {
   const today = toDateKey();
   const d7 = toDateKey(addDays(new Date(), -7));
   const d14 = toDateKey(addDays(new Date(), -14));
   const insights = [];
 
-  const recent = adherenceBetween(patientId, d7, `${today} 23:59`);
-  const previous = adherenceBetween(patientId, d14, d7);
+  const recent = await adherenceBetween(patientId, d7, `${today} 23:59`);
+  const previous = await adherenceBetween(patientId, d14, d7);
 
   if (recent.total > 0) {
     if (previous.rate !== null && recent.rate !== null && recent.rate < previous.rate - 10) {
@@ -224,7 +224,7 @@ function summarizePatient(patientId) {
     }
   }
 
-  const missedByHour = all(
+  const missedByHour = await all(
     `SELECT substr(scheduled_at, 12, 2) AS hour, COUNT(*) AS c
        FROM medication_doses
       WHERE patient_id = ? AND status = 'missed' AND scheduled_at >= ?
@@ -240,7 +240,7 @@ function summarizePatient(patientId) {
     });
   }
 
-  const glucose = all(
+  const glucose = await all(
     'SELECT value, measured_at FROM glucose_readings WHERE patient_id = ? ORDER BY measured_at DESC LIMIT 10',
     patientId,
   );
@@ -278,7 +278,7 @@ function summarizePatient(patientId) {
     });
   }
 
-  const missedMeasurements = get(
+  const missedMeasurements = await get(
     `SELECT COUNT(*) AS c FROM monitoring_tasks
       WHERE patient_id = ? AND status = 'missed' AND scheduled_at >= ?`,
     patientId,
@@ -292,7 +292,7 @@ function summarizePatient(patientId) {
     });
   }
 
-  const symptomCount = get(
+  const symptomCount = await get(
     `SELECT COUNT(*) AS c FROM symptom_checks
       WHERE patient_id = ? AND feeling != 'good' AND reported_at >= ?`,
     patientId,
@@ -324,7 +324,7 @@ export function generateCarePlanSuggestion(context) {
   return { provider: name, ...provider.suggestCarePlan(context) };
 }
 
-export function generatePatientSummary(patientId) {
+export async function generatePatientSummary(patientId) {
   const { name, provider } = activeProvider();
-  return { provider: name, ...provider.summarizePatient(patientId) };
+  return { provider: name, ...(await provider.summarizePatient(patientId)) };
 }

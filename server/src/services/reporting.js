@@ -3,9 +3,9 @@ import { addDays, nowLocal, toDateKey } from '../lib/time.js';
 import { getActivePlan } from './carePlan.js';
 
 /** Adherence over a window, as a whole percentage (null when nothing was due). */
-export function adherenceRate(patientId, days = 7) {
+export async function adherenceRate(patientId, days = 7) {
   const from = toDateKey(addDays(new Date(), -days));
-  const row = get(
+  const row = await get(
     `SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'taken' THEN 1 ELSE 0 END) AS taken
        FROM medication_doses
       WHERE patient_id = ? AND scheduled_at >= ? AND scheduled_at <= ?`,
@@ -25,26 +25,26 @@ export function latestGlucose(patientId) {
   );
 }
 
-export function lastActivity(patientId) {
-  const row = get(
+export async function lastActivity(patientId) {
+  const row = await get(
     `SELECT MAX(ts) AS ts FROM (
         SELECT MAX(taken_at) AS ts FROM medication_doses WHERE patient_id = ?
         UNION ALL SELECT MAX(measured_at) FROM glucose_readings WHERE patient_id = ?
         UNION ALL SELECT MAX(measured_at) FROM blood_pressure_readings WHERE patient_id = ?
         UNION ALL SELECT MAX(reported_at) FROM symptom_checks WHERE patient_id = ?
-     )`,
+     ) AS activity`,
     patientId, patientId, patientId, patientId,
   );
   return row?.ts ?? null;
 }
 
 /** Everything the reports screen needs for one patient over a period. */
-export function buildReport(patientId, days = 7) {
+export async function buildReport(patientId, days = 7) {
   const fromKey = toDateKey(addDays(new Date(), -(days - 1)));
   const from = `${fromKey} 00:00`;
   const to = nowLocal();
 
-  const doses = all(
+  const doses = await all(
     `SELECT d.*, m.name, m.priority FROM medication_doses d
        JOIN medications m ON m.id = d.medication_id
       WHERE d.patient_id = ? AND d.scheduled_at >= ? AND d.scheduled_at <= ?
@@ -54,7 +54,8 @@ export function buildReport(patientId, days = 7) {
 
   const byDay = new Map();
   for (let i = days - 1; i >= 0; i -= 1) {
-    byDay.set(toDateKey(addDays(new Date(), -i)), { date: toDateKey(addDays(new Date(), -i)), total: 0, taken: 0 });
+    const key = toDateKey(addDays(new Date(), -i));
+    byDay.set(key, { date: key, total: 0, taken: 0 });
   }
   for (const dose of doses) {
     const key = dose.scheduled_at.slice(0, 10);
@@ -68,22 +69,22 @@ export function buildReport(patientId, days = 7) {
     rate: b.total > 0 ? Math.round((b.taken / b.total) * 100) : null,
   }));
 
-  const glucose = all(
+  const glucose = await all(
     `SELECT * FROM glucose_readings WHERE patient_id = ? AND measured_at >= ?
       ORDER BY measured_at`,
     patientId, from,
   );
-  const bp = all(
+  const bp = await all(
     `SELECT * FROM blood_pressure_readings WHERE patient_id = ? AND measured_at >= ?
       ORDER BY measured_at`,
     patientId, from,
   );
-  const symptoms = all(
+  const symptoms = await all(
     `SELECT * FROM symptom_checks WHERE patient_id = ? AND reported_at >= ?
       ORDER BY reported_at DESC`,
     patientId, from,
   );
-  const alerts = all(
+  const alerts = await all(
     `SELECT * FROM alerts WHERE patient_id = ? AND created_at >= ?
       ORDER BY created_at DESC`,
     patientId, from,
@@ -101,7 +102,7 @@ export function buildReport(patientId, days = 7) {
   );
 
   const glucoseValues = glucose.map((g) => g.value);
-  const plan = getActivePlan(patientId);
+  const plan = await getActivePlan(patientId);
 
   return {
     period_days: days,

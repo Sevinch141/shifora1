@@ -11,7 +11,8 @@ import {
   DEFAULT_CAREGIVER_PERMISSIONS,
 } from '../services/access.js';
 import { approvePlan, createDraftPlan, getActivePlan, getPlanDetail } from '../services/carePlan.js';
-import { adherenceRate, buildReport, lastActivity, latestGlucose } from '../services/reporting.js';
+import { adherenceRate, buildReport, lastActivity } from '../services/reporting.js';
+import { addDays, nowLocal, toDateKey } from '../lib/time.js';
 import { getDailyPlan } from '../services/dailyPlan.js';
 
 const router = Router();
@@ -25,9 +26,9 @@ router.use(requireAuth);
 router.get(
   '/stats',
   requireHospitalStaff,
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const hospitalId = req.user.hospital_id;
-    const counts = get(
+    const counts = await get(
       `SELECT COUNT(*) AS total,
               SUM(CASE WHEN status = 'stable' THEN 1 ELSE 0 END) AS stable,
               SUM(CASE WHEN status = 'attention' THEN 1 ELSE 0 END) AS attention,
@@ -35,7 +36,7 @@ router.get(
          FROM patients WHERE hospital_id = ?`,
       hospitalId,
     );
-    const openAlerts = get(
+    const openAlerts = await get(
       `SELECT COUNT(*) AS c FROM alerts WHERE hospital_id = ? AND status != 'closed'`,
       hospitalId,
     );
@@ -56,44 +57,74 @@ router.get(
 router.get(
   '/',
   requireHospitalStaff,
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const { query = '', status = '' } = req.query;
-    const params = [req.user.hospital_id];
-    let sql = `SELECT p.*, dp.diabetes_type
-                 FROM patients p
-                 LEFT JOIN diabetes_profiles dp ON dp.patient_id = p.id
-                WHERE p.hospital_id = ?`;
+
+    // Everything the list needs is gathered in ONE round-trip. Per-patient
+    // lookups would mean four queries per row — fine against a local file,
+    // far too slow against a network database with a caseload this size.
+    const adherenceFrom = toDateKey(addDays(new Date(), -7));
+    const params = [adherenceFrom, nowLocal(), req.user.hospital_id];
+    let sql = `
+      SELECT p.id, p.first_name, p.last_name, p.phone, p.status,
+             dp.diabetes_type,
+             g.value AS glucose_value, g.measured_at AS glucose_at,
+             COALESCE(al.open_count, 0) AS open_alerts,
+             COALESCE(al.has_urgent, 0) AS has_urgent,
+             ad.total AS dose_total, ad.taken AS dose_taken,
+             act.last_activity
+        FROM patients p
+        LEFT JOIN diabetes_profiles dp ON dp.patient_id = p.id
+        LEFT JOIN LATERAL (
+          SELECT value, measured_at FROM glucose_readings
+           WHERE patient_id = p.id ORDER BY measured_at DESC LIMIT 1
+        ) g ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS open_count,
+                 MAX(CASE WHEN severity = 'urgent' THEN 1 ELSE 0 END) AS has_urgent
+            FROM alerts WHERE patient_id = p.id AND status != 'closed'
+        ) al ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS total,
+                 SUM(CASE WHEN status = 'taken' THEN 1 ELSE 0 END) AS taken
+            FROM medication_doses
+           WHERE patient_id = p.id AND scheduled_at >= ? AND scheduled_at <= ?
+        ) ad ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT MAX(ts) AS last_activity FROM (
+            SELECT MAX(taken_at) AS ts FROM medication_doses WHERE patient_id = p.id
+            UNION ALL SELECT MAX(measured_at) FROM glucose_readings WHERE patient_id = p.id
+            UNION ALL SELECT MAX(measured_at) FROM blood_pressure_readings WHERE patient_id = p.id
+            UNION ALL SELECT MAX(reported_at) FROM symptom_checks WHERE patient_id = p.id
+          ) t
+        ) act ON TRUE
+       WHERE p.hospital_id = ?`;
     if (status && status !== 'all') {
       sql += ' AND p.status = ?';
       params.push(status);
     }
     if (query.trim()) {
-      sql += " AND (p.first_name || ' ' || p.last_name LIKE ? OR p.phone LIKE ?)";
+      sql += " AND (p.first_name || ' ' || p.last_name ILIKE ? OR p.phone LIKE ?)";
       params.push(`%${query.trim()}%`, `%${query.trim()}%`);
     }
     sql += " ORDER BY CASE p.status WHEN 'urgent' THEN 0 WHEN 'attention' THEN 1 ELSE 2 END, p.last_name";
 
-    const patients = all(sql, ...params).map((patient) => {
-      const glucose = latestGlucose(patient.id);
-      const openAlerts = get(
-        `SELECT COUNT(*) AS c, MAX(CASE WHEN severity = 'urgent' THEN 1 ELSE 0 END) AS urgent
-           FROM alerts WHERE patient_id = ? AND status != 'closed'`,
-        patient.id,
-      );
-      return {
-        id: patient.id,
-        first_name: patient.first_name,
-        last_name: patient.last_name,
-        phone: patient.phone,
-        status: patient.status,
-        diabetes_type: patient.diabetes_type,
-        adherence: adherenceRate(patient.id, 7).rate,
-        last_glucose: glucose ? { value: glucose.value, measured_at: glucose.measured_at } : null,
-        last_activity: lastActivity(patient.id),
-        open_alerts: openAlerts?.c ?? 0,
-        has_urgent_alert: (openAlerts?.urgent ?? 0) === 1,
-      };
-    });
+    const rows = await all(sql, ...params);
+    const patients = rows.map((row) => ({
+      id: row.id,
+      first_name: row.first_name,
+      last_name: row.last_name,
+      phone: row.phone,
+      status: row.status,
+      diabetes_type: row.diabetes_type,
+      adherence: row.dose_total > 0 ? Math.round((row.dose_taken / row.dose_total) * 100) : null,
+      last_glucose: row.glucose_value === null || row.glucose_value === undefined
+        ? null
+        : { value: row.glucose_value, measured_at: row.glucose_at },
+      last_activity: row.last_activity,
+      open_alerts: row.open_alerts,
+      has_urgent_alert: row.has_urgent === 1,
+    }));
 
     res.json({ patients });
   }),
@@ -106,7 +137,7 @@ router.get(
 router.post(
   '/',
   requireHospitalStaff,
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const body = req.body ?? {};
     const patientInput = validate(body.patient ?? {}, {
       first_name: { required: true, message: 'Ismni kiriting.' },
@@ -133,14 +164,14 @@ router.post(
       });
     }
     if (account.create) {
-      const exists = get('SELECT id FROM users WHERE phone = ?', patientInput.phone);
+      const exists = await get('SELECT id FROM users WHERE phone = ?', patientInput.phone);
       if (exists) throw new ApiError(409, "Bu telefon raqami tizimda allaqachon ro'yxatdan o'tgan.");
     }
 
-    const result = transaction(() => {
+    const result = await transaction(async () => {
       let userId = null;
       if (account.create) {
-        userId = insert(
+        userId = await insert(
           `INSERT INTO users (hospital_id, role, full_name, phone, password_hash, language, created_by)
            VALUES (?, 'patient', ?, ?, ?, ?, ?)`,
           req.user.hospital_id,
@@ -152,7 +183,7 @@ router.post(
         );
       }
 
-      const patientId = insert(
+      const patientId = await insert(
         `INSERT INTO patients
            (hospital_id, user_id, first_name, last_name, birth_date, gender, phone, address,
             emergency_contact_name, emergency_contact_phone, language, discharge_date, created_by)
@@ -172,7 +203,7 @@ router.post(
         req.user.id,
       );
 
-      insert(
+      await insert(
         `INSERT INTO diabetes_profiles
            (patient_id, diabetes_type, diagnosis_date, hba1c, recent_hospitalization,
             prior_hypoglycemia, clinical_notes, cgm_enabled, created_by)
@@ -200,12 +231,12 @@ router.post(
             caregiver_password: "Parol kamida 4 ta belgidan iborat bo'lishi kerak.",
           });
         }
-        let cgUser = get('SELECT * FROM users WHERE phone = ?', cg.phone);
+        let cgUser = await get('SELECT * FROM users WHERE phone = ?', cg.phone);
         if (cgUser && cgUser.role !== 'caregiver') {
           throw new ApiError(409, 'Bu telefon raqami boshqa turdagi hisob uchun ishlatilgan.');
         }
         if (!cgUser) {
-          const cgUserId = insert(
+          const cgUserId = await insert(
             `INSERT INTO users (hospital_id, role, full_name, phone, password_hash, created_by)
              VALUES (?, 'caregiver', ?, ?, ?, ?)`,
             req.user.hospital_id,
@@ -216,7 +247,7 @@ router.post(
           );
           cgUser = { id: cgUserId };
         }
-        caregiverId = insert(
+        caregiverId = await insert(
           `INSERT INTO caregivers
              (patient_id, user_id, relation, status, authorized_by, authorized_at, created_by)
            VALUES (?, ?, ?, 'active', ?, datetime('now'), ?)`,
@@ -228,7 +259,7 @@ router.post(
         );
         const granted = { ...DEFAULT_CAREGIVER_PERMISSIONS, ...(body.caregiver.permissions ?? {}) };
         for (const key of CAREGIVER_PERMISSIONS) {
-          insert(
+          await insert(
             `INSERT INTO caregiver_permissions (caregiver_id, permission_key, allowed, created_by)
              VALUES (?, ?, ?, ?)`,
             caregiverId,
@@ -239,19 +270,19 @@ router.post(
         }
       }
 
-      const planId = createDraftPlan(patientId, body.care_plan ?? {}, req.user);
+      const planId = await createDraftPlan(patientId, body.care_plan ?? {}, req.user);
       return { patientId, planId, userId, caregiverId };
     });
 
-    audit(req, 'patient.register', 'patient', result.patientId, {
+    await audit(req, 'patient.register', 'patient', result.patientId, {
       care_plan_id: result.planId,
       account_created: Boolean(result.userId),
     });
 
-    let plan = getPlanDetail(result.planId);
+    let plan = await getPlanDetail(result.planId);
     if (body.approve) {
-      plan = approvePlan(result.planId, req.user, "Dastlabki reja tasdiqlandi");
-      audit(req, 'care_plan.approve', 'care_plan', result.planId, { version: plan.version });
+      plan = await approvePlan(result.planId, req.user, "Dastlabki reja tasdiqlandi");
+      await audit(req, 'care_plan.approve', 'care_plan', result.planId, { version: plan.version });
     }
 
     res.status(201).json({ patient_id: result.patientId, care_plan: plan });
@@ -264,53 +295,59 @@ router.post(
 
 router.get(
   '/:id',
-  wrap((req, res) => {
-    const { patient } = assertPatientAccess(req.user, req.params.id);
-    audit(req, 'patient.view', 'patient', patient.id);
+  wrap(async (req, res) => {
+    const { patient } = await assertPatientAccess(req.user, req.params.id);
+    await audit(req, 'patient.view', 'patient', patient.id);
 
-    const profile = get('SELECT * FROM diabetes_profiles WHERE patient_id = ?', patient.id);
-    const activePlan = getActivePlan(patient.id);
-    const planDetail = activePlan ? getPlanDetail(activePlan.id) : null;
+    const profile = await get('SELECT * FROM diabetes_profiles WHERE patient_id = ?', patient.id);
+    const activePlan = await getActivePlan(patient.id);
+    const planDetail = activePlan ? await getPlanDetail(activePlan.id) : null;
+
+    const caregiverRows = await all(
+      `SELECT c.id, c.relation, c.status, c.authorized_at, u.full_name, u.phone
+         FROM caregivers c JOIN users u ON u.id = c.user_id
+        WHERE c.patient_id = ?`,
+      patient.id,
+    );
+    const caregivers = [];
+    for (const caregiver of caregiverRows) {
+      caregivers.push({ ...caregiver, permissions: await caregiverPermissions(caregiver.id) });
+    }
 
     res.json({
       patient,
       profile,
       care_plan: planDetail,
       adherence: {
-        d7: adherenceRate(patient.id, 7),
-        d30: adherenceRate(patient.id, 30),
+        d7: await adherenceRate(patient.id, 7),
+        d30: await adherenceRate(patient.id, 30),
       },
-      last_activity: lastActivity(patient.id),
-      today: getDailyPlan(patient.id),
-      glucose: all(
+      last_activity: await lastActivity(patient.id),
+      today: await getDailyPlan(patient.id),
+      glucose: await all(
         'SELECT * FROM glucose_readings WHERE patient_id = ? ORDER BY measured_at DESC LIMIT 10',
         patient.id,
       ),
-      blood_pressure: all(
+      blood_pressure: await all(
         'SELECT * FROM blood_pressure_readings WHERE patient_id = ? ORDER BY measured_at DESC LIMIT 10',
         patient.id,
       ),
-      symptoms: all(
+      symptoms: await all(
         'SELECT * FROM symptom_checks WHERE patient_id = ? ORDER BY reported_at DESC LIMIT 10',
         patient.id,
       ),
-      alerts: all(
+      alerts: await all(
         'SELECT * FROM alerts WHERE patient_id = ? ORDER BY created_at DESC LIMIT 20',
         patient.id,
       ),
-      caregivers: all(
-        `SELECT c.id, c.relation, c.status, c.authorized_at, u.full_name, u.phone
-           FROM caregivers c JOIN users u ON u.id = c.user_id
-          WHERE c.patient_id = ?`,
-        patient.id,
-      ).map((c) => ({ ...c, permissions: caregiverPermissions(c.id) })),
-      plan_history: all(
+      caregivers,
+      plan_history: await all(
         `SELECT cp.id, cp.version, cp.status, cp.approved_at, cp.notes, u.full_name AS approver
            FROM care_plans cp LEFT JOIN users u ON u.id = cp.approved_by
           WHERE cp.patient_id = ? ORDER BY cp.version DESC`,
         patient.id,
       ),
-      ai_recommendations: all(
+      ai_recommendations: await all(
         `SELECT * FROM ai_recommendations WHERE patient_id = ? ORDER BY created_at DESC LIMIT 5`,
         patient.id,
       ),
@@ -320,19 +357,19 @@ router.get(
 
 router.get(
   '/:id/report',
-  wrap((req, res) => {
-    const { patient } = assertPatientAccess(req.user, req.params.id, 'view_measurements');
+  wrap(async (req, res) => {
+    const { patient } = await assertPatientAccess(req.user, req.params.id, 'view_measurements');
     const days = [7, 14, 30].includes(Number(req.query.days)) ? Number(req.query.days) : 7;
-    audit(req, 'patient.report', 'patient', patient.id, { days });
-    res.json(buildReport(patient.id, days));
+    await audit(req, 'patient.report', 'patient', patient.id, { days });
+    res.json(await buildReport(patient.id, days));
   }),
 );
 
 router.get(
   '/:id/plan-day',
-  wrap((req, res) => {
-    const { patient } = assertPatientAccess(req.user, req.params.id, 'view_today_plan');
-    res.json(getDailyPlan(patient.id, req.query.date));
+  wrap(async (req, res) => {
+    const { patient } = await assertPatientAccess(req.user, req.params.id, 'view_today_plan');
+    res.json(await getDailyPlan(patient.id, req.query.date));
   }),
 );
 
@@ -343,8 +380,8 @@ router.get(
 router.post(
   '/:id/caregivers',
   requireHospitalStaff,
-  wrap((req, res) => {
-    const { patient } = assertPatientAccess(req.user, req.params.id);
+  wrap(async (req, res) => {
+    const { patient } = await assertPatientAccess(req.user, req.params.id);
     const input = validate(req.body, {
       full_name: { required: true, message: 'Ismni kiriting.' },
       phone: { required: true, message: 'Telefon raqamini kiriting.' },
@@ -352,12 +389,12 @@ router.post(
       password: { required: true, message: 'Parolni kiriting.' },
     });
 
-    let user = get('SELECT * FROM users WHERE phone = ?', input.phone);
+    let user = await get('SELECT * FROM users WHERE phone = ?', input.phone);
     if (user && user.role !== 'caregiver') {
       throw new ApiError(409, 'Bu telefon raqami boshqa turdagi hisob uchun ishlatilgan.');
     }
     if (!user) {
-      const id = insert(
+      const id = await insert(
         `INSERT INTO users (hospital_id, role, full_name, phone, password_hash, created_by)
          VALUES (?, 'caregiver', ?, ?, ?, ?)`,
         req.user.hospital_id,
@@ -369,50 +406,50 @@ router.post(
       user = { id };
     }
 
-    const existing = get(
+    const existing = await get(
       'SELECT id FROM caregivers WHERE patient_id = ? AND user_id = ?',
       patient.id, user.id,
     );
     if (existing) throw new ApiError(409, 'Bu yaqin kishi allaqachon biriktirilgan.');
 
-    const caregiverId = insert(
+    const caregiverId = await insert(
       `INSERT INTO caregivers (patient_id, user_id, relation, status, authorized_by, authorized_at, created_by)
        VALUES (?, ?, ?, 'active', ?, datetime('now'), ?)`,
       patient.id, user.id, input.relation, req.user.id, req.user.id,
     );
     const granted = { ...DEFAULT_CAREGIVER_PERMISSIONS, ...(req.body.permissions ?? {}) };
     for (const key of CAREGIVER_PERMISSIONS) {
-      insert(
+      await insert(
         `INSERT INTO caregiver_permissions (caregiver_id, permission_key, allowed, created_by)
          VALUES (?, ?, ?, ?)`,
         caregiverId, key, granted[key] ? 1 : 0, req.user.id,
       );
     }
-    audit(req, 'caregiver.authorize', 'caregiver', caregiverId, { patient_id: patient.id });
-    res.status(201).json({ id: caregiverId, permissions: caregiverPermissions(caregiverId) });
+    await audit(req, 'caregiver.authorize', 'caregiver', caregiverId, { patient_id: patient.id });
+    res.status(201).json({ id: caregiverId, permissions: await caregiverPermissions(caregiverId) });
   }),
 );
 
 router.patch(
   '/:id/caregivers/:caregiverId',
   requireHospitalStaff,
-  wrap((req, res) => {
-    const { patient } = assertPatientAccess(req.user, req.params.id);
-    const caregiver = get(
+  wrap(async (req, res) => {
+    const { patient } = await assertPatientAccess(req.user, req.params.id);
+    const caregiver = await get(
       'SELECT * FROM caregivers WHERE id = ? AND patient_id = ?',
       Number(req.params.caregiverId), patient.id,
     );
     if (!caregiver) throw notFound('Yaqin kishi topilmadi.');
 
     if (req.body.status && ['active', 'revoked', 'pending'].includes(req.body.status)) {
-      run(
+      await run(
         "UPDATE caregivers SET status = ?, updated_at = datetime('now') WHERE id = ?",
         req.body.status, caregiver.id,
       );
     }
     for (const [key, value] of Object.entries(req.body.permissions ?? {})) {
       if (!CAREGIVER_PERMISSIONS.includes(key)) continue;
-      run(
+      await run(
         `INSERT INTO caregiver_permissions (caregiver_id, permission_key, allowed, created_by)
          VALUES (?, ?, ?, ?)
          ON CONFLICT (caregiver_id, permission_key)
@@ -420,8 +457,8 @@ router.patch(
         caregiver.id, key, value ? 1 : 0, req.user.id,
       );
     }
-    audit(req, 'caregiver.update', 'caregiver', caregiver.id, req.body);
-    res.json({ id: caregiver.id, permissions: caregiverPermissions(caregiver.id) });
+    await audit(req, 'caregiver.update', 'caregiver', caregiver.id, req.body);
+    res.json({ id: caregiver.id, permissions: await caregiverPermissions(caregiver.id) });
   }),
 );
 
@@ -432,29 +469,31 @@ router.patch(
 router.get(
   '/:id/care-plans',
   requireRole('nurse', 'doctor', 'hospital_admin'),
-  wrap((req, res) => {
-    const { patient } = assertPatientAccess(req.user, req.params.id);
-    const plans = all(
+  wrap(async (req, res) => {
+    const { patient } = await assertPatientAccess(req.user, req.params.id);
+    const plans = await all(
       `SELECT cp.*, u.full_name AS approver_name
          FROM care_plans cp LEFT JOIN users u ON u.id = cp.approved_by
         WHERE cp.patient_id = ? ORDER BY cp.version DESC`,
       patient.id,
     );
-    res.json({ plans: plans.map((p) => getPlanDetail(p.id)) });
+    const detailed = [];
+    for (const plan of plans) detailed.push(await getPlanDetail(plan.id));
+    res.json({ plans: detailed });
   }),
 );
 
 router.post(
   '/:id/care-plans',
   requireRole('nurse', 'doctor'),
-  wrap((req, res) => {
-    const { patient } = assertPatientAccess(req.user, req.params.id);
+  wrap(async (req, res) => {
+    const { patient } = await assertPatientAccess(req.user, req.params.id);
     if (!(req.body.medications ?? []).length && !(req.body.monitoring ?? []).length) {
       throw badRequest("Rejada kamida bitta dori yoki kuzatuv turi bo'lishi kerak.");
     }
-    const planId = createDraftPlan(patient.id, req.body, req.user);
-    audit(req, 'care_plan.create_draft', 'care_plan', planId, { patient_id: patient.id });
-    res.status(201).json(getPlanDetail(planId));
+    const planId = await createDraftPlan(patient.id, req.body, req.user);
+    await audit(req, 'care_plan.create_draft', 'care_plan', planId, { patient_id: patient.id });
+    res.status(201).json(await getPlanDetail(planId));
   }),
 );
 

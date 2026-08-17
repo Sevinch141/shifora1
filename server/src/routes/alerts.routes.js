@@ -22,7 +22,7 @@ function decorate(row) {
 
 router.get(
   '/',
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const { status = 'open', severity = '', limit = '100' } = req.query;
     const params = [req.user.hospital_id];
     let sql = `SELECT a.*, p.first_name, p.last_name, u.full_name AS assigned_name
@@ -44,14 +44,15 @@ router.get(
              a.created_at DESC LIMIT ?`;
     params.push(Math.min(Number(limit) || 100, 300));
 
-    res.json({ alerts: all(sql, ...params).map(decorate) });
+    const rows = await all(sql, ...params);
+    res.json({ alerts: rows.map(decorate) });
   }),
 );
 
 router.get(
   '/:id',
-  wrap((req, res) => {
-    const alert = get(
+  wrap(async (req, res) => {
+    const alert = await get(
       `SELECT a.*, p.first_name, p.last_name, p.phone, p.emergency_contact_name,
               p.emergency_contact_phone, u.full_name AS assigned_name
          FROM alerts a
@@ -61,10 +62,10 @@ router.get(
       Number(req.params.id), req.user.hospital_id,
     );
     if (!alert) throw notFound('Ogohlantirish topilmadi.');
-    audit(req, 'alert.view', 'alert', alert.id);
+    await audit(req, 'alert.view', 'alert', alert.id);
     res.json({
       ...decorate(alert),
-      notes: all(
+      notes: await all(
         `SELECT n.*, u.full_name FROM alert_notes n JOIN users u ON u.id = n.created_by
           WHERE n.alert_id = ? ORDER BY n.created_at DESC`,
         alert.id,
@@ -75,8 +76,8 @@ router.get(
 
 router.patch(
   '/:id',
-  wrap((req, res) => {
-    const alert = get(
+  wrap(async (req, res) => {
+    const alert = await get(
       'SELECT * FROM alerts WHERE id = ? AND hospital_id = ?',
       Number(req.params.id), req.user.hospital_id,
     );
@@ -86,29 +87,29 @@ router.patch(
     if (status && !ALERT_STATUSES.includes(status)) throw badRequest("Noto'g'ri holat tanlandi.");
 
     if (status === 'closed') {
-      closeAlert(alert.id, req.user.id);
+      await closeAlert(alert.id, req.user.id);
     } else if (status) {
-      run(
+      await run(
         `UPDATE alerts SET status = ?, updated_at = datetime('now') WHERE id = ?`,
         status, alert.id,
       );
     }
     if (assignee !== undefined) {
-      run(
+      await run(
         `UPDATE alerts SET assigned_user_id = ?, updated_at = datetime('now') WHERE id = ?`,
         assignee || null, alert.id,
       );
     }
-    recomputePatientStatus(alert.patient_id);
-    audit(req, 'alert.update', 'alert', alert.id, { status, assigned_user_id: assignee });
-    res.json(decorate(get('SELECT * FROM alerts WHERE id = ?', alert.id)));
+    await recomputePatientStatus(alert.patient_id);
+    await audit(req, 'alert.update', 'alert', alert.id, { status, assigned_user_id: assignee });
+    res.json(decorate(await get('SELECT * FROM alerts WHERE id = ?', alert.id)));
   }),
 );
 
 router.post(
   '/:id/notes',
-  wrap((req, res) => {
-    const alert = get(
+  wrap(async (req, res) => {
+    const alert = await get(
       'SELECT * FROM alerts WHERE id = ? AND hospital_id = ?',
       Number(req.params.id), req.user.hospital_id,
     );
@@ -116,11 +117,11 @@ router.post(
     const note = String(req.body?.note ?? '').trim();
     if (!note) throw badRequest('Izoh matnini kiriting.', { note: 'Izoh bo‘sh bo‘lmasligi kerak.' });
 
-    const id = insert(
+    const id = await insert(
       'INSERT INTO alert_notes (alert_id, note, created_by) VALUES (?, ?, ?)',
       alert.id, note, req.user.id,
     );
-    audit(req, 'alert.note', 'alert', alert.id, { note_id: id });
+    await audit(req, 'alert.note', 'alert', alert.id, { note_id: id });
     res.status(201).json({ id });
   }),
 );

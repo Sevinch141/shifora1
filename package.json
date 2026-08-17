@@ -1,0 +1,20 @@
+{
+  "name": "shifora",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shifora — post-discharge diabetes monitoring platform",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "npm --prefix web install --no-audit --no-fund && npm --prefix web run build",
+    "dev": "npm --prefix server run dev",
+    "dev:web": "npm --prefix web run dev",
+    "seed": "node server/src/db/seed.js",
+    "migrate": "node server/src/db/migrate.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}

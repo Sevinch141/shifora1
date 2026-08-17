@@ -1,17 +1,18 @@
 {
   "name": "shifora-server",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Shifora — post-discharge diabetes monitoring platform (API)",
   "scripts": {
-    "dev": "node --watch src/index.js",
-    "start": "node src/index.js",
-    "seed": "node src/db/seed.js",
-    "reset": "rm -f data/shifora.db && node src/db/seed.js"
+    "dev": "node --watch --env-file-if-exists=../.env src/index.js",
+    "start": "node --env-file-if-exists=../.env src/index.js",
+    "migrate": "node --env-file-if-exists=../.env src/db/migrate.js",
+    "seed": "node --env-file-if-exists=../.env src/db/seed.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
   }
 }

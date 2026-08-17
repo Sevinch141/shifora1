@@ -13,8 +13,8 @@ export function registerChannel(name, deliver) {
   channels.set(name, deliver);
 }
 
-registerChannel('in_app', (payload) => {
-  insert(
+registerChannel('in_app', async (payload) => {
+  await insert(
     `INSERT INTO notifications (user_id, patient_id, channel, type, title, body, entity_type, entity_id)
      VALUES (?, ?, 'in_app', ?, ?, ?, ?, ?)`,
     payload.userId,
@@ -27,10 +27,10 @@ registerChannel('in_app', (payload) => {
   );
 });
 
-export function notify(payload) {
+export async function notify(payload) {
   const targets = payload.channels ?? ['in_app'];
   for (const name of targets) {
     const deliver = channels.get(name);
-    if (deliver) deliver(payload);
+    if (deliver) await deliver(payload);
   }
 }

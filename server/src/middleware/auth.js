@@ -4,14 +4,18 @@ import { forbidden, unauthorized } from '../lib/http.js';
 export const HOSPITAL_ROLES = ['nurse', 'doctor', 'hospital_admin'];
 
 /** Attaches req.user from the Bearer token. Rejects anonymous requests. */
-export function requireAuth(req, res, next) {
-  const header = req.get('authorization') ?? '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-  const user = resolveSession(token);
-  if (!user) return next(unauthorized());
-  req.user = user;
-  req.token = token;
-  next();
+export async function requireAuth(req, res, next) {
+  try {
+    const header = req.get('authorization') ?? '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    const user = await resolveSession(token);
+    if (!user) return next(unauthorized());
+    req.user = user;
+    req.token = token;
+    next();
+  } catch (err) {
+    next(err);
+  }
 }
 
 /** Restricts a route to specific roles. Always applied server-side. */
