@@ -10,6 +10,15 @@ The product answers one question:
 > whether the patient is following the approved plan, and whether something
 > needs attention?
 
+## 📊 Project Presentation
+
+The full project presentation is available here:
+
+**[Shifora — Project Presentation (PDF)](Shifora.pdf)**
+
+It covers the problem, the product, and how the platform works. GitHub renders
+the file in the browser; use the download button there to save a copy.
+
 ## Medical safety boundaries
 
 These are enforced by the design, not just documented:
