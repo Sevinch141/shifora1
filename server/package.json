@@ -1,0 +1,17 @@
+{
+  "name": "shifora-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shifora — post-discharge diabetes monitoring platform (API)",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "seed": "node src/db/seed.js",
+    "reset": "rm -f data/shifora.db && node src/db/seed.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}
