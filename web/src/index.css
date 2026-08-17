@@ -726,10 +726,165 @@ a:hover { text-decoration: underline; }
 
 /* ------------------------------------------------------------ responsive */
 
-@media (max-width: 900px) {
-  .sidebar { display: none; }
-  .content { padding: 18px 16px 48px; }
-  .topbar { padding: 14px 16px; }
+/* Breakpoints
+   mobile  ≤ 480px   (reference 390px)
+   tablet  481–1024px (reference 768px)
+   desktop ≥ 1025px  — the existing design, left untouched.
+
+   Off-canvas navigation. These controls sit in the markup at every width but
+   only appear once the sidebar stops being permanent, so the desktop layout is
+   unchanged. */
+
+.topbar__menu,
+.sidebar__close {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.topbar__menu:hover,
+.sidebar__close:hover { background: var(--bg); }
+
+.topbar__heading { min-width: 0; }
+
+.sidebar__scrim { display: none; }
+
+@media (max-width: 1024px) {
+  /* Bigger base type for reading at arm's length. Every rem in this sheet
+     scales from it, so the whole interface grows together. */
+  html { font-size: 17px; }
+  body { font-size: 1rem; }
+
+  .topbar__menu { display: inline-flex; }
+  .sidebar__close {
+    display: inline-flex;
+    position: absolute;
+    top: 14px;
+    inset-inline-end: 14px;
+  }
+
+  /* The sidebar becomes a panel that slides in over the page. `visibility`
+     (not just `transform`) keeps its links out of the tab order while closed. */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    inset-inline-start: 0;
+    height: 100dvh;
+    width: min(320px, 86vw);
+    z-index: 70;
+    transform: translateX(-100%);
+    visibility: hidden;
+    /* `visibility` is what keeps the closed panel out of the tab order, and it
+       is timed differently in each direction. Closing: it rides the 0.22s
+       transition, staying visible until the panel has slid away. Opening (the
+       rule below): zero duration, so the panel is focusable immediately rather
+       than after the slide — focus is moved into it the moment it opens. */
+    transition: transform 0.22s ease, visibility 0.22s;
+    box-shadow: 0 0 40px rgba(16, 32, 39, 0.2);
+  }
+  .sidebar--open {
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform 0.22s ease, visibility 0s;
+  }
+
+  .sidebar__brand {
+    position: relative;
+    padding-inline-end: 68px;
+  }
+
+  .sidebar__scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 65;
+    background: rgba(16, 32, 39, 0.45);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.22s ease, visibility 0.22s;
+  }
+  .sidebar__scrim--on {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 0.22s ease, visibility 0s;
+  }
+
+  body.is-menu-open { overflow: hidden; }
+
+  .topbar {
+    padding: 12px 16px;
+    gap: 12px;
+    justify-content: flex-start;
+  }
+  .topbar__heading { flex: 1; }
+  .topbar__actions { margin-inline-start: auto; }
+  .topbar__sub {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .content { padding: 20px 18px 56px; }
+
+  /* Touch targets: nothing tappable below 44px. */
+  .navlink { min-height: 48px; }
+  .btn--sm { min-height: 44px; padding: 9px 14px; }
+  .chip { min-height: 44px; }
+  .tab { min-height: 44px; }
+  .tabbar__item { min-height: 52px; }
+
+  .table-wrap { -webkit-overflow-scrolling: touch; }
+
   .kv { grid-template-columns: 1fr; gap: 2px 0; }
   .kv dd { margin-bottom: 10px; }
+}
+
+@media (max-width: 480px) {
+  .content { padding: 16px 14px 56px; }
+  .topbar { padding: 10px 12px; }
+  .topbar__title { font-size: 1.12rem; }
+
+  .stats { grid-template-columns: 1fr; }
+  .grid2,
+  .grid3 { grid-template-columns: 1fr; }
+
+  .card__head { padding: 14px 16px; }
+  .card__body { padding: 16px; }
+
+  .stat { padding: 16px; }
+  .stat__value { font-size: 1.9rem; }
+
+  .alert-row { padding: 14px 16px; }
+  .modal__body { padding: 18px; }
+  .modal__head,
+  .modal__foot { padding: 14px 18px; }
+  .modal__foot .btn { flex: 1; }
+
+  /* Five labels across a 390px bar: keep them legible by letting them wrap
+     rather than shrinking the type further. */
+  .tabbar__item {
+    font-size: 0.7rem;
+    line-height: 1.15;
+    overflow-wrap: anywhere;
+  }
+
+  .patient-app .content { padding: 18px 14px 96px; }
+  .task { padding: 15px; gap: 11px; }
+  .task__time { min-width: 54px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .sidebar__scrim { transition: none; }
 }

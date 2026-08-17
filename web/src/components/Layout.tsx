@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { NavLink, useNavigate } from 'react-router-dom'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { uz } from '../lib/uz'
 import { useAuth } from '../lib/auth'
 import { useNotifications } from '../lib/hooks'
@@ -13,6 +13,7 @@ interface NavItem {
   icon: string
   badge?: number
 }
+
 
 function NotificationBell() {
   const [open, setOpen] = useState(false)
@@ -68,7 +69,17 @@ function NotificationBell() {
   )
 }
 
-/** Sidebar shell used by the hospital and caregiver interfaces. */
+/**
+ * Sidebar shell used by the hospital interface.
+ *
+ * The sidebar is permanent from 1025px up. Below that it becomes an off-canvas
+ * panel opened by the topbar hamburger: staff on a phone or tablet previously
+ * had no navigation at all, because the sidebar was simply hidden.
+ *
+ * While open it behaves like a dialog — Escape closes it, Tab is trapped inside,
+ * focus moves in and returns to the toggle on close, and the page behind cannot
+ * scroll. Closing on navigation keeps a tap on a link from leaving it open.
+ */
 export function SidebarLayout({ items, title, subtitle, actions, children }: {
   items: NavItem[]
   title: string
@@ -78,15 +89,86 @@ export function SidebarLayout({ items, title, subtitle, actions, children }: {
 }) {
   const { session, logout } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  const [menuOpen, setMenuOpen] = useState(false)
+  const sidebarRef = useRef<HTMLElement>(null)
+  const toggleRef = useRef<HTMLButtonElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
 
   const roleLabel = session ? uz.roles[session.user.role as keyof typeof uz.roles] : ''
 
+  // A tapped link should navigate and leave the panel closed.
+  useEffect(() => { setMenuOpen(false) }, [location.pathname])
+
+
+  useEffect(() => {
+    if (!menuOpen) return
+
+    const panel = sidebarRef.current
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMenuOpen(false)
+        return
+      }
+      if (event.key !== 'Tab' || !panel) return
+
+      // Keep Tab inside the panel while it covers the page.
+      const focusable = panel.querySelectorAll<HTMLElement>('a[href], button:not([disabled])')
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', onKeyDown)
+    document.body.classList.add('is-menu-open')
+    closeRef.current?.focus()
+
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.body.classList.remove('is-menu-open')
+    }
+  }, [menuOpen])
+
+  const closeMenu = () => {
+    setMenuOpen(false)
+    toggleRef.current?.focus()
+  }
+
   return (
     <div className="shell">
-      <aside className="sidebar">
+      <div
+        className={`sidebar__scrim ${menuOpen ? 'sidebar__scrim--on' : ''}`}
+        onClick={closeMenu}
+        aria-hidden
+      />
+
+      <aside
+        id="app-sidebar"
+        ref={sidebarRef}
+        className={`sidebar ${menuOpen ? 'sidebar--open' : ''}`}
+        aria-label={uz.app.menu}
+      >
         <div className="sidebar__brand">
           <div className="sidebar__logo"><span aria-hidden>🩺</span> {uz.app.name}</div>
           <div className="sidebar__tagline">{uz.app.tagline}</div>
+          <button
+            type="button"
+            ref={closeRef}
+            className="sidebar__close"
+            onClick={closeMenu}
+            aria-label={uz.app.closeMenu}
+          >
+            <span aria-hidden>✕</span>
+          </button>
         </div>
         <nav className="sidebar__nav">
           {items.map((item) => (
@@ -120,7 +202,18 @@ export function SidebarLayout({ items, title, subtitle, actions, children }: {
 
       <div className="main">
         <header className="topbar">
-          <div>
+          <button
+            type="button"
+            ref={toggleRef}
+            className="topbar__menu"
+            onClick={() => setMenuOpen(true)}
+            aria-label={uz.app.openMenu}
+            aria-controls="app-sidebar"
+            aria-expanded={menuOpen}
+          >
+            <span aria-hidden>☰</span>
+          </button>
+          <div className="topbar__heading">
             <div className="topbar__title">{title}</div>
             {subtitle ? <div className="topbar__sub">{subtitle}</div> : null}
           </div>
