@@ -61,6 +61,38 @@ For a single-process deployment, build the client first — the API then serves 
 cd web && npm run build && cd ../server && npm start
 ```
 
+## Deploying to Vercel
+
+The repository deploys as one project: `web/dist` is served as static files and
+every `/api/*` path is rewritten to the Express app in `api/index.js`.
+
+Required environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Pooled Postgres connection string. The app refuses to start without it. |
+| `CRON_SECRET` | Shared secret guarding `/api/cron/tick`. |
+
+After the database exists, create the schema and demo data by running
+`npm run migrate` and `npm run seed` locally with `DATABASE_URL` pointing at it.
+
+### Driving the reminder engine
+
+Nothing runs continuously on a serverless platform, so `/api/cron/tick` has to
+be called on a schedule — each call performs one `tick()` of the reminder and
+escalation engine.
+
+Vercel Cron is not used here: its Hobby plan allows only one run per day, which
+is far too coarse for medication reminders. Instead, point any external
+scheduler at the endpoint once a minute:
+
+```
+https://<your-deployment>/api/cron/tick?key=<CRON_SECRET>
+```
+
+The endpoint also accepts `Authorization: Bearer <CRON_SECRET>`, so Vercel Cron
+can still be used on a paid plan by restoring a `crons` entry in `vercel.json`.
+
 ## Demo accounts
 
 | Rol | Telefon | Parol |
