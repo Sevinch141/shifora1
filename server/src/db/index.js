@@ -20,6 +20,19 @@ if (!DATABASE_URL) {
   );
 }
 
+// A value that is not a Postgres URL at all — most often an unreplaced
+// placeholder — otherwise surfaces much later as a bare `ENOTFOUND`, naming a
+// fragment of the placeholder as the host. Only the scheme is echoed back,
+// because a real connection string carries a password.
+if (!/^postgres(ql)?:\/\//.test(DATABASE_URL)) {
+  const shown = DATABASE_URL.includes('@') ? '<parol bor, ko\u2018rsatilmadi>' : DATABASE_URL;
+  throw new Error(
+    `DATABASE_URL Postgres manzili emas: ${shown}\n` +
+    'Kutilgan ko\u2018rinish: postgresql://foydalanuvchi:parol@host/baza?sslmode=require\n' +
+    'Manzilni Vercel > Storage > baza sahifasidan nusxalang.',
+  );
+}
+
 /**
  * Postgres access layer.
  *
