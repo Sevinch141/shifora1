@@ -22,7 +22,15 @@ if (existsSync(webDist)) {
   app.get(/^\/(?!api).*/, (req, res) => res.sendFile(join(webDist, 'index.html')));
 }
 
-await migrate();
+// A misconfigured database should not stop the server from starting: booting
+// anyway means /api/health answers and the database routes report the real
+// reason, instead of the process dying with a stack trace.
+try {
+  await migrate();
+} catch (err) {
+  console.error('[db]', err.message);
+  console.error('[db] Server ishga tushadi, lekin bazaga bog\u2018liq yo\u2018llar xato qaytaradi.');
+}
 
 /**
  * In production the reminder engine is driven by Vercel Cron hitting

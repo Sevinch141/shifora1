@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { DATABASE_URL, TIMEZONE } from '../config.js';
+import { ApiError } from '../lib/http.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -14,24 +15,32 @@ const here = dirname(fileURLToPath(import.meta.url));
 pg.types.setTypeParser(pg.types.builtins.INT8, (value) => (value === null ? null : Number(value)));
 pg.types.setTypeParser(pg.types.builtins.NUMERIC, (value) => (value === null ? null : Number(value)));
 
-if (!DATABASE_URL) {
-  throw new Error(
-    'DATABASE_URL belgilanmagan. Postgres ulanish manzilini .env faylida yoki Vercel muhit sozlamalarida kiriting.',
-  );
-}
+/**
+ * Configuration is validated but NOT thrown at import time.
+ *
+ * A module-level throw takes the whole serverless function down before it can
+ * handle a request, and the platform reports only an opaque
+ * FUNCTION_INVOCATION_FAILED — every route, including ones that never touch the
+ * database, returns a 500 with no indication of why. Deferring the error to the
+ * first query keeps the app importable, so /api/health still answers and the
+ * database routes return this message instead of a blank crash.
+ */
+const configError = (() => {
+  if (!DATABASE_URL) {
+    return 'DATABASE_URL belgilanmagan. Postgres ulanish manzilini .env faylida yoki Vercel muhit sozlamalarida kiriting.';
+  }
+  // Most often an unreplaced placeholder, which otherwise surfaces deep in the
+  // pool as a bare ENOTFOUND naming a fragment of the placeholder as the host.
+  // Only the scheme is echoed back, because a real URL carries a password.
+  if (!/^postgres(ql)?:\/\//.test(DATABASE_URL)) {
+    const shown = DATABASE_URL.includes('@') ? '<parol bor, ko\u2018rsatilmadi>' : DATABASE_URL;
+    return `DATABASE_URL Postgres manzili emas: ${shown}. `
+      + 'Kutilgan ko\u2018rinish: postgresql://foydalanuvchi:parol@host/baza?sslmode=require';
+  }
+  return null;
+})();
 
-// A value that is not a Postgres URL at all — most often an unreplaced
-// placeholder — otherwise surfaces much later as a bare `ENOTFOUND`, naming a
-// fragment of the placeholder as the host. Only the scheme is echoed back,
-// because a real connection string carries a password.
-if (!/^postgres(ql)?:\/\//.test(DATABASE_URL)) {
-  const shown = DATABASE_URL.includes('@') ? '<parol bor, ko\u2018rsatilmadi>' : DATABASE_URL;
-  throw new Error(
-    `DATABASE_URL Postgres manzili emas: ${shown}\n` +
-    'Kutilgan ko\u2018rinish: postgresql://foydalanuvchi:parol@host/baza?sslmode=require\n' +
-    'Manzilni Vercel > Storage > baza sahifasidan nusxalang.',
-  );
-}
+if (configError) console.error('[db]', configError);
 
 /**
  * Postgres access layer.
@@ -41,23 +50,32 @@ if (!/^postgres(ql)?:\/\//.test(DATABASE_URL)) {
  * its own. Point DATABASE_URL at a POOLED connection string (Neon's `-pooler`
  * host) so short-lived instances do not exhaust backend connections.
  */
-const pool = new pg.Pool({
-  connectionString: DATABASE_URL,
-  max: Number(process.env.PG_POOL_MAX ?? 3),
-  idleTimeoutMillis: 10_000,
-  connectionTimeoutMillis: 15_000,
-  // Every session speaks the same clock as the Node process (see config.js).
-  // Sent as a startup parameter rather than a post-connect query, so it is
-  // already in effect for the very first statement on the connection.
-  options: `-c timezone=${TIMEZONE}`,
-  // Managed Postgres (Neon, Supabase, Vercel) terminates TLS with certificates
-  // this client does not need to verify itself; local development has no TLS.
-  ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false },
-});
+let pool = null;
 
-pool.on('error', (err) => {
-  console.error('[pg pool]', err.message);
-});
+function getPool() {
+  if (configError) throw new ApiError(503, configError);
+  if (pool) return pool;
+
+  pool = new pg.Pool({
+    connectionString: DATABASE_URL,
+    max: Number(process.env.PG_POOL_MAX ?? 3),
+    idleTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 15_000,
+    // Every session speaks the same clock as the Node process (see config.js).
+    // Sent as a startup parameter rather than a post-connect query, so it is
+    // already in effect for the very first statement on the connection.
+    options: `-c timezone=${TIMEZONE}`,
+    // Managed Postgres (Neon, Supabase, Vercel) terminates TLS with certificates
+    // this client does not need to verify itself; local development has no TLS.
+    ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false },
+  });
+
+  pool.on('error', (err) => {
+    console.error('[pg pool]', err.message);
+  });
+
+  return pool;
+}
 
 /** Transaction-scoped client, so nested helpers join the open transaction. */
 const txStore = new AsyncLocalStorage();
@@ -97,8 +115,11 @@ async function execute(sql, params) {
   const text = toPgPlaceholders(sql);
   const client = txStore.getStore();
   try {
-    return client ? await client.query(text, params) : await pool.query(text, params);
+    return client ? await client.query(text, params) : await getPool().query(text, params);
   } catch (err) {
+    // A configuration error is about the setup, not the statement; appending
+    // SQL to it only buries the instruction the reader needs.
+    if (err instanceof ApiError) throw err;
     err.message = `${err.message}\nSQL: ${text.trim().slice(0, 300)}`;
     throw err;
   }
@@ -154,7 +175,7 @@ export async function transaction(fn) {
     }
   }
 
-  const client = await pool.connect();
+  const client = await getPool().connect();
   try {
     await client.query('BEGIN');
     const result = await txStore.run(client, fn);
@@ -171,11 +192,11 @@ export async function transaction(fn) {
 /** Applies schema.sql. Safe to run repeatedly. */
 export async function migrate() {
   const sql = readFileSync(join(here, 'schema.sql'), 'utf8');
-  await pool.query(sql);
+  await getPool().query(sql);
 }
 
 export async function closePool() {
-  await pool.end();
+  if (pool) await pool.end();
 }
 
-export { pool };
+export { getPool };
