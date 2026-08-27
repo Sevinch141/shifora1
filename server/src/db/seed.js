@@ -462,11 +462,23 @@ async function seed() {
   const staff = await createStaff(hospitalId);
 
   // 128 patients, split so the dashboard shows a plausible caseload.
+  //
+  // Seeding writes roughly 17k rows one statement at a time, which is a minute
+  // locally but far longer against a managed database an ocean away — and it
+  // all runs in one transaction. SHIFORA_SEED_PATIENTS scales the caseload down
+  // for that case, keeping the same proportions so the dashboard still looks
+  // like a real one.
+  const requested = Number(process.env.SHIFORA_SEED_PATIENTS ?? 128);
+  const total = Number.isFinite(requested) && requested > 0 ? Math.round(requested) : 128;
+  const attention = Math.max(1, Math.round(total * (27 / 128)));
+  const urgent = Math.max(1, Math.round(total * (7 / 128)));
+  const stable = Math.max(1, total - attention - urgent);
   const cohort = [
-    ...Array(94).fill('stable'),
-    ...Array(27).fill('attention'),
-    ...Array(7).fill('urgent'),
+    ...Array(stable).fill('stable'),
+    ...Array(attention).fill('attention'),
+    ...Array(urgent).fill('urgent'),
   ];
+  console.log(`Bemorlar soni: ${cohort.length} (barqaror ${stable}, e'tibor ${attention}, shoshilinch ${urgent})`);
 
   // Two demo patients with real logins, at the front of the caseload.
   const demoPatient = await createPatient({
