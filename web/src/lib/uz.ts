@@ -88,6 +88,7 @@ export const uz = {
       care: 'Parvarish',
       status: 'Holat',
       alerts: 'Ogohlantirishlar',
+      profile: 'Profil',
     },
   },
 
@@ -490,6 +491,10 @@ export const uz = {
 
   caregiver: {
     title: 'Yaqiningiz holati',
+    profileTitle: 'Profil',
+    account: 'Hisobingiz',
+    watchedPatients: 'Siz kuzatayotgan bemorlar',
+    permissionsNote: 'Har bir bemor uchun qaysi ma\u2018lumotni ko\u2018rishingiz shifoxona tomonidan belgilanadi.',
     todayMedications: 'Bugungi dori qabul qilish',
     todayPlan: 'Bugungi reja',
     planDone: 'Bajarildi',

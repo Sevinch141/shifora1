@@ -8,6 +8,7 @@ import { CaregiverHomePage } from './CaregiverHomePage'
 import { CaregiverCarePage } from './CaregiverCarePage'
 import { CaregiverStatusPage } from './CaregiverStatusPage'
 import { CaregiverAlertsPage } from './CaregiverAlertsPage'
+import { CaregiverProfilePage } from './CaregiverProfilePage'
 
 const BASE = '/yaqin'
 
@@ -71,6 +72,7 @@ export function CaregiverApp() {
     { to: `${BASE}/parvarish`, label: uz.nav.caregiver.care, icon: '📋' },
     { to: `${BASE}/holat`, label: uz.nav.caregiver.status, icon: '📈' },
     { to: `${BASE}/ogohlantirishlar`, label: uz.nav.caregiver.alerts, icon: '🔔', badge: unread },
+    { to: `${BASE}/profil`, label: uz.nav.caregiver.profile, icon: '👤' },
   ]
 
   if (loading) return <PatientLayout items={items}><div className="content"><Loading /></div></PatientLayout>
@@ -80,9 +82,18 @@ export function CaregiverApp() {
   if (!patient) {
     return (
       <PatientLayout items={items}>
-        <div className="content">
-          <Card><Empty icon="👨‍👩‍👦" title={uz.caregiver.noPatients} /></Card>
-        </div>
+        {/* Routed even with no patient attached, so signing out stays reachable. */}
+        <Routes>
+          <Route path="profil" element={<CaregiverProfilePage />} />
+          <Route
+            path="*"
+            element={(
+              <div className="content">
+                <Card><Empty icon="👨‍👩‍👦" title={uz.caregiver.noPatients} /></Card>
+              </div>
+            )}
+          />
+        </Routes>
       </PatientLayout>
     )
   }
@@ -95,6 +106,7 @@ export function CaregiverApp() {
           <Route path="parvarish" element={<CaregiverCarePage />} />
           <Route path="holat" element={<CaregiverStatusPage />} />
           <Route path="ogohlantirishlar" element={<CaregiverAlertsPage />} />
+          <Route path="profil" element={<CaregiverProfilePage />} />
           <Route path="*" element={<CaregiverHomePage />} />
         </Routes>
       </PatientLayout>
