@@ -15,6 +15,7 @@ import meRoutes from './routes/me.routes.js';
 import aiRoutes from './routes/ai.routes.js';
 import caregiverRoutes from './routes/caregiver.routes.js';
 import cronRoutes from './routes/cron.routes.js';
+import assistantRoutes from './routes/assistant.routes.js';
 
 /**
  * The Express application, with no listener attached.
@@ -33,6 +34,7 @@ export function createApp() {
   app.get('/api/health', (req, res) => res.json({ ok: true, service: 'shifora' }));
 
   app.use('/api/auth', authRoutes);
+  app.use('/api/assistant', assistantRoutes);
   app.use('/api/patients', patientRoutes);
   app.use('/api/care-plans', carePlanRoutes);
   app.use('/api/alerts', alertRoutes);

@@ -455,3 +455,90 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id, created_at);
+
+-- ---------------------------------------------------------------------------
+-- Medication reminder metadata
+--
+-- Added to the existing medications table rather than a parallel one: the
+-- schedule, the dose ledger and the reminder engine all already key off it.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE medications ADD COLUMN IF NOT EXISTS prescriber_id INTEGER REFERENCES users(id);
+ALTER TABLE medications ADD COLUMN IF NOT EXISTS is_active INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE medications ADD COLUMN IF NOT EXISTS reminders_enabled INTEGER NOT NULL DEFAULT 1;
+
+-- ---------------------------------------------------------------------------
+-- Approved medical guidance
+--
+-- The corpus the assistant is allowed to interpret findings against. It ships
+-- EMPTY on purpose: reference ranges must come from a real published source or
+-- a protocol a clinician entered and approved, never from the model and never
+-- from a default written here. With no rows, every interpretive question is
+-- refused and queued for staff, which is the intended safe state.
+--
+-- source_org: WHO | ADA | IDF | NHS | UZ_MOH | hospital_protocol
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS medical_guidance (
+  id            SERIAL PRIMARY KEY,
+  hospital_id   INTEGER REFERENCES hospitals(id) ON DELETE CASCADE,
+  source_org    TEXT NOT NULL,
+  topic         TEXT NOT NULL,
+  title         TEXT NOT NULL,
+  content       TEXT NOT NULL,
+  citation      TEXT NOT NULL,
+  url           TEXT,
+  language      TEXT NOT NULL DEFAULT 'uz',
+  effective_from TEXT,
+  is_active     INTEGER NOT NULL DEFAULT 1,
+  approved_by   INTEGER REFERENCES users(id),
+  approved_at   TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  created_by    INTEGER REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_guidance_topic ON medical_guidance(topic, is_active);
+CREATE INDEX IF NOT EXISTS idx_guidance_hospital ON medical_guidance(hospital_id);
+
+-- ---------------------------------------------------------------------------
+-- Unanswered question queue
+--
+-- A question the assistant declined becomes a ticket for staff rather than
+-- disappearing. The audit columns record what was retrieved and why the
+-- assistant refused — the retrieved sources and score, never reasoning traces.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS patient_questions (
+  id               SERIAL PRIMARY KEY,
+  patient_id       INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  hospital_id      INTEGER REFERENCES hospitals(id) ON DELETE SET NULL,
+  asked_by         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  question         TEXT NOT NULL,
+  language         TEXT NOT NULL DEFAULT 'uz',
+  status           TEXT NOT NULL DEFAULT 'unanswered',
+  priority         TEXT NOT NULL DEFAULT 'normal',
+  ai_attempted     INTEGER NOT NULL DEFAULT 0,
+  ai_answer        TEXT,
+  refusal_reason   TEXT,
+  retrieved_sources TEXT,
+  retrieval_score  DOUBLE PRECISION,
+  assigned_to      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  answer           TEXT,
+  answered_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  answered_at      TEXT,
+  created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_questions_patient ON patient_questions(patient_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_questions_queue ON patient_questions(hospital_id, status, priority);
+
+-- Internal staff notes on a question. Kept apart from `answer` because they are
+-- never shown to the patient.
+CREATE TABLE IF NOT EXISTS question_notes (
+  id          SERIAL PRIMARY KEY,
+  question_id INTEGER NOT NULL REFERENCES patient_questions(id) ON DELETE CASCADE,
+  user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  note        TEXT NOT NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_question_notes ON question_notes(question_id);

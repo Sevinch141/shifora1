@@ -226,3 +226,109 @@ export interface NotificationItem {
   entity_type: string | null
   entity_id: number | null
 }
+
+// --------------------------------------------------------- Hamshira AI
+
+export interface GlucoseWindow {
+  days: number
+  all: { count: number; average: number | null; min: number | null; max: number | null; unit: string | null }
+  fasting: { count: number; average: number | null; min: number | null; max: number | null; unit: string | null }
+  post_meal: { count: number; average: number | null; min: number | null; max: number | null; unit: string | null }
+  change: { earlier_average: number; later_average: number; delta: number; unit: string } | null
+  in_range: {
+    low: number
+    high: number
+    unit: string
+    inside: number
+    total: number
+    percent: number
+    source: { kind: string; label: string }
+  } | null
+  latest: { value: number; unit: string; context: string; measured_at: string } | null
+}
+
+export interface GlucoseTrend {
+  generated_at: string
+  total_readings: number
+  last_7_days: GlucoseWindow
+  last_30_days: GlucoseWindow
+  recent: { value: number; unit: string; context: string; measured_at: string }[]
+}
+
+export interface AssistantSource {
+  kind: string
+  source_org?: string
+  title?: string
+  content?: string
+  citation?: string
+  url?: string | null
+  answer?: string
+  answered_at?: string
+  score?: number
+  label?: string
+  low?: number | null
+  high?: number | null
+}
+
+export interface AssistantReply {
+  answered: boolean
+  intent: string
+  message: string
+  disclaimer?: string
+  emergency?: boolean
+  queued_message?: string
+  status_label?: string
+  question_id?: number
+  refusal_reason?: string
+  priority?: string
+  trend?: GlucoseTrend
+  sources?: AssistantSource[]
+  retrieval_score?: number
+}
+
+export type QuestionStatus = 'unanswered' | 'assigned' | 'answered' | 'closed'
+export type QuestionPriority = 'normal' | 'high' | 'urgent'
+
+export interface PatientQuestion {
+  id: number
+  question: string
+  status: QuestionStatus
+  priority: QuestionPriority
+  ai_answer: string | null
+  answer: string | null
+  created_at: string
+  answered_at: string | null
+  answered_by_name: string | null
+  answered_by_role: string | null
+}
+
+export interface QueueQuestion {
+  id: number
+  patient_id: number
+  question: string
+  status: QuestionStatus
+  priority: QuestionPriority
+  refusal_reason: string | null
+  created_at: string
+  answered_at: string | null
+  first_name: string
+  last_name: string
+  patient_status: PatientStatus
+  assigned_to_name: string | null
+}
+
+export interface QuestionDetail {
+  question: QueueQuestion & {
+    hospital_id: number
+    language: string
+    ai_attempted: number
+    ai_answer: string | null
+    retrieval_score: number | null
+    retrieved_sources: AssistantSource[]
+    answered_by_name: string | null
+    answer: string | null
+  }
+  trend: GlucoseTrend
+  medications: { name: string; dose: string; unit: string; doses_per_day: number; is_active: number; times: string | null }[]
+  notes: { id: number; note: string; created_at: string; full_name: string | null }[]
+}

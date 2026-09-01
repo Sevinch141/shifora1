@@ -40,12 +40,18 @@ router.get(
       `SELECT COUNT(*) AS c FROM alerts WHERE hospital_id = ? AND status != 'closed'`,
       hospitalId,
     );
+    const openQuestions = await get(
+      `SELECT COUNT(*) AS c FROM patient_questions
+        WHERE hospital_id = ? AND status IN ('unanswered', 'assigned')`,
+      hospitalId,
+    );
     res.json({
       total: counts?.total ?? 0,
       stable: counts?.stable ?? 0,
       attention: counts?.attention ?? 0,
       urgent: counts?.urgent ?? 0,
       open_alerts: openAlerts?.c ?? 0,
+      open_questions: openQuestions?.c ?? 0,
     });
   }),
 );
