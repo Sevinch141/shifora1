@@ -16,6 +16,7 @@ import aiRoutes from './routes/ai.routes.js';
 import caregiverRoutes from './routes/caregiver.routes.js';
 import cronRoutes from './routes/cron.routes.js';
 import assistantRoutes from './routes/assistant.routes.js';
+import chatRoutes from './routes/chat.routes.js';
 
 /**
  * The Express application, with no listener attached.
@@ -35,6 +36,7 @@ export function createApp() {
 
   app.use('/api/auth', authRoutes);
   app.use('/api/assistant', assistantRoutes);
+  app.use('/api/chat', chatRoutes);
   app.use('/api/patients', patientRoutes);
   app.use('/api/care-plans', carePlanRoutes);
   app.use('/api/alerts', alertRoutes);

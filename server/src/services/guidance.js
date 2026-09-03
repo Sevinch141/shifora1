@@ -15,6 +15,7 @@
  * queued for a human. That silence is the designed behaviour, not a gap.
  */
 import { all, get } from '../db/index.js';
+import { searchDocuments } from './documentLibrary.js';
 
 /** Below this, retrieval is treated as having found nothing usable. */
 export const RETRIEVAL_THRESHOLD = Number(process.env.SHIFORA_RETRIEVAL_THRESHOLD ?? 0.35);
@@ -156,14 +157,34 @@ export async function priorStaffAnswers(patientId, question) {
 }
 
 /**
+ * Clinician notes the patient is allowed to see.
+ *
+ * The visibility filter is in the SQL, not in the caller: an internal note must
+ * never reach the assistant's context in the first place.
+ */
+export async function patientVisibleNotes(patientId) {
+  return all(
+    `SELECT n.id, n.note, n.created_at, u.full_name AS author_name
+       FROM patient_notes n
+       LEFT JOIN users u ON u.id = n.author_id
+      WHERE n.patient_id = ? AND n.visibility = 'patient_visible'
+      ORDER BY n.created_at DESC
+      LIMIT 5`,
+    patientId,
+  );
+}
+
+/**
  * Everything approved that bears on this patient and question, in one call.
  * `range` being null is the signal that no interpretation may be offered.
  */
 export async function interpretationFor(patientId, hospitalId, topic, question) {
-  const [range, guidance, staffAnswers] = await Promise.all([
+  const [range, guidance, documents, staffAnswers, notes] = await Promise.all([
     approvedGlucoseRange(patientId),
     retrieveGuidance(topic, question, hospitalId),
+    searchDocuments(question, hospitalId, { threshold: RETRIEVAL_THRESHOLD }),
     priorStaffAnswers(patientId, question),
+    patientVisibleNotes(patientId),
   ]);
-  return { range, guidance, staffAnswers };
+  return { range, guidance, documents, staffAnswers, notes };
 }

@@ -21,3 +21,13 @@ export const CRON_SECRET = process.env.CRON_SECRET ?? '';
 export const IS_VERCEL = Boolean(process.env.VERCEL);
 
 export const PORT = Number(process.env.PORT ?? 4000);
+
+/** Gemini powers transcription, image reading, embeddings and reply wording.
+ *  Everything that uses it degrades safely when the key is absent. */
+export const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? '';
+export const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.0-flash';
+export const GEMINI_EMBED_MODEL = process.env.GEMINI_EMBED_MODEL ?? 'text-embedding-004';
+
+/** Per-patient daily caps, enforced in the backend. */
+export const VOICE_DAILY_LIMIT = Number(process.env.SHIFORA_VOICE_LIMIT ?? 2);
+export const IMAGE_DAILY_LIMIT = Number(process.env.SHIFORA_IMAGE_LIMIT ?? 1);

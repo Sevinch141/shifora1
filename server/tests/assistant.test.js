@@ -71,6 +71,25 @@ test('dose questions are classified as medication changes', () => {
   assert.equal(classify('Metforminni to‘xtataymi?'), 'medication_change');
 });
 
+// Uzbek suffixes are the failure mode worth pinning: an earlier whole-word
+// match let "dozasini oshirsam" through as an ordinary question.
+test('dose questions are caught through their suffixes', () => {
+  for (const question of [
+    'Insulin dozasini oshirsam bo‘ladimi?',
+    'Insulin dozamni kamaytirsam?',
+    'Dorimni ichmasam bo‘ladimi?',
+    'Tabletkani ko‘proq ichsam bo‘ladimi?',
+    'Ukolni tashlasam nima bo‘ladi?',
+  ]) {
+    assert.equal(classify(question), 'medication_change', question);
+  }
+});
+
+test('ordinary questions are not swept up as dose changes', () => {
+  assert.notEqual(classify('Ertaga qabulga kelaymi?'), 'medication_change');
+  assert.notEqual(classify('Qandim oxirgi kunlarda qanday?'), 'medication_change');
+});
+
 test('emergency wording outranks every other category', () => {
   assert.equal(classify('Nafas ololmayapman va dozani oshirsam?'), 'emergency');
 });

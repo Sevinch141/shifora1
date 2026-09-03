@@ -542,3 +542,148 @@ CREATE TABLE IF NOT EXISTS question_notes (
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_question_notes ON question_notes(question_id);
+
+-- ---------------------------------------------------------------------------
+-- Hamshira AI: conversations, media, usage limits
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS chat_conversations (
+  id              SERIAL PRIMARY KEY,
+  patient_id      INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  title           TEXT,
+  -- Older turns are folded into this summary so context stays bounded without
+  -- losing what the conversation established.
+  summary         TEXT,
+  summarised_upto INTEGER,
+  last_message_at TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_conv_patient ON chat_conversations(patient_id, last_message_at);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id              SERIAL PRIMARY KEY,
+  conversation_id INTEGER NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+  patient_id      INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  role            TEXT NOT NULL,            -- patient | assistant
+  kind            TEXT NOT NULL DEFAULT 'text', -- text | voice | image
+  content         TEXT NOT NULL,
+  media_id        INTEGER,
+  language        TEXT NOT NULL DEFAULT 'uz',
+  answered        INTEGER,
+  refusal_reason  TEXT,
+  question_id     INTEGER REFERENCES patient_questions(id) ON DELETE SET NULL,
+  sources_json    TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_msg_conv ON chat_messages(conversation_id, id);
+
+-- Voice notes and photographs. Bytes live in the row because a serverless
+-- deployment has no persistent disk; `storage_path` is the URL the client
+-- fetches, so swapping in object storage later changes only this table.
+CREATE TABLE IF NOT EXISTS patient_media (
+  id           SERIAL PRIMARY KEY,
+  patient_id   INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  kind         TEXT NOT NULL,               -- voice | image
+  mime_type    TEXT NOT NULL,
+  byte_size    INTEGER NOT NULL,
+  content      BYTEA,
+  storage_path TEXT,
+  transcript   TEXT,                        -- voice
+  ocr_text     TEXT,                        -- image
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_media_patient ON patient_media(patient_id, created_at);
+
+-- One row per patient per calendar day. The backend is the only authority on
+-- the limits; the client merely displays what this table reports.
+CREATE TABLE IF NOT EXISTS ai_usage_daily (
+  id          SERIAL PRIMARY KEY,
+  patient_id  INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  usage_date  TEXT NOT NULL,
+  voice_count INTEGER NOT NULL DEFAULT 0,
+  image_count INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (patient_id, usage_date)
+);
+
+-- ---------------------------------------------------------------------------
+-- Clinician notes, split by who may read them
+--
+-- The assistant reads only `patient_visible`. Internal notes are excluded in
+-- the query itself, not hidden by the interface.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS patient_notes (
+  id         SERIAL PRIMARY KEY,
+  patient_id INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  author_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  visibility TEXT NOT NULL DEFAULT 'internal',  -- patient_visible | internal
+  note       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_notes_patient ON patient_notes(patient_id, visibility);
+
+-- ---------------------------------------------------------------------------
+-- Emergency contacts — structure only, no interface yet
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS patient_emergency_contacts (
+  id           SERIAL PRIMARY KEY,
+  patient_id   INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+  full_name    TEXT NOT NULL,
+  relationship TEXT,
+  phone        TEXT NOT NULL,
+  is_primary   INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_emergency_patient ON patient_emergency_contacts(patient_id, is_primary);
+
+-- ---------------------------------------------------------------------------
+-- Admin document library
+--
+-- Official PDFs are uploaded, split into chunks and embedded. Guideline text
+-- is never written into the codebase — it only ever arrives this way.
+--
+-- `embedding` holds a JSON array rather than a pgvector column: the extension
+-- is not available on every deployment, and cosine similarity over a hospital
+-- corpus is cheap in process. The retrieval interface hides which is in use,
+-- so a pgvector column can replace this without touching callers.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS guidance_documents (
+  id           SERIAL PRIMARY KEY,
+  hospital_id  INTEGER REFERENCES hospitals(id) ON DELETE CASCADE,
+  source_org   TEXT NOT NULL,
+  title        TEXT NOT NULL,
+  filename     TEXT,
+  mime_type    TEXT,
+  byte_size    INTEGER,
+  content      BYTEA,
+  page_count   INTEGER,
+  status       TEXT NOT NULL DEFAULT 'processing', -- processing | ready | failed
+  error        TEXT,
+  chunk_count  INTEGER NOT NULL DEFAULT 0,
+  embedded     INTEGER NOT NULL DEFAULT 0,
+  uploaded_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  approved_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  approved_at  TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_docs_hospital ON guidance_documents(hospital_id, status);
+
+CREATE TABLE IF NOT EXISTS guidance_chunks (
+  id            SERIAL PRIMARY KEY,
+  document_id   INTEGER NOT NULL REFERENCES guidance_documents(id) ON DELETE CASCADE,
+  chunk_index   INTEGER NOT NULL,
+  section_title TEXT,
+  page_from     INTEGER,
+  content       TEXT NOT NULL,
+  embedding     TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_doc ON guidance_chunks(document_id, chunk_index);
