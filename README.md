@@ -72,9 +72,24 @@ Required environment variables:
 | --- | --- |
 | `DATABASE_URL` | Pooled Postgres connection string. The app refuses to start without it. |
 | `CRON_SECRET` | Shared secret guarding `/api/cron/tick`. |
+| `PG_CONNECT_TIMEOUT_MS` | Optional. Connection timeout, default 15000; raise it on a slow link. |
+| `SHIFORA_RETRIEVAL_THRESHOLD` | Optional. Minimum retrieval score the assistant will act on, default 0.35. |
 
-After the database exists, create the schema and demo data by running
-`npm run migrate` and `npm run seed` locally with `DATABASE_URL` pointing at it.
+The schema is applied by the build itself — `buildCommand` runs `npm run
+migrate` before building the client, so a deploy can never ship code that
+expects a table the database does not have. Migrations are idempotent
+(`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`), so this is safe to
+repeat on every deploy.
+
+Demo data is separate and deliberately manual, because seeding truncates:
+
+```bash
+DATABASE_URL='<connection-string>' npm run seed
+```
+
+`SHIFORA_SEED_PATIENTS` scales the caseload down when seeding across a slow
+link. To restore only the staff logins without touching existing records, use
+`npm run seed:staff` instead.
 
 ### Driving the reminder engine
 

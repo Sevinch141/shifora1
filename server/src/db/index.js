@@ -60,7 +60,10 @@ function getPool() {
     connectionString: DATABASE_URL,
     max: Number(process.env.PG_POOL_MAX ?? 3),
     idleTimeoutMillis: 10_000,
-    connectionTimeoutMillis: 15_000,
+    // Raisable for slow links: establishing a TLS + Postgres session to a
+    // managed database can exceed the default on a congested connection, and
+    // the failure reads as an unexplained "connection terminated".
+    connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS ?? 15_000),
     // Every session speaks the same clock as the Node process (see config.js).
     // Sent as a startup parameter rather than a post-connect query, so it is
     // already in effect for the very first statement on the connection.

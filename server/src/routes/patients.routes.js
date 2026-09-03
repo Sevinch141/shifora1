@@ -40,11 +40,20 @@ router.get(
       `SELECT COUNT(*) AS c FROM alerts WHERE hospital_id = ? AND status != 'closed'`,
       hospitalId,
     );
-    const openQuestions = await get(
-      `SELECT COUNT(*) AS c FROM patient_questions
-        WHERE hospital_id = ? AND status IN ('unanswered', 'assigned')`,
-      hospitalId,
-    );
+    // A counter for one feature must not be able to take the dashboard down.
+    // If the questions table has not been migrated yet, report zero and carry
+    // on; anything else is a real fault and still propagates.
+    let openQuestions = { c: 0 };
+    try {
+      openQuestions = await get(
+        `SELECT COUNT(*) AS c FROM patient_questions
+          WHERE hospital_id = ? AND status IN ('unanswered', 'assigned')`,
+        hospitalId,
+      );
+    } catch (err) {
+      if (err.code !== '42P01') throw err; // 42P01 = undefined_table
+      console.warn('[stats] patient_questions jadvali yo‘q — migratsiya kerak.');
+    }
     res.json({
       total: counts?.total ?? 0,
       stable: counts?.stable ?? 0,
